@@ -7,6 +7,7 @@ import random
 import aiohttp
 import asyncio
 import json
+import subprocess
 import sys
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -15,11 +16,12 @@ from telebot import types
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
-# ========== НАСТРОЙКИ ==========
+# ========== НАСТРОЙКИ (из переменных окружения) ==========
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 DB_PATH = os.path.join("/tmp", "otob_bot.db")
 
+# ===== КЛЮЧИ API (из переменных окружения) =====
 VERIPHONE_KEY = os.environ.get("VERIPHONE_KEY")
 OMKAR_KEY = os.environ.get("OMKAR_KEY")
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
@@ -149,6 +151,7 @@ def get_remaining(user_id: int) -> int:
     user = get_user(user_id)
     return (3 - user["searches_today"]) + user["searches_extra"]
 
+# ==================== ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ====================
 def detect_query_type(query: str) -> str:
     query = query.strip()
     if re.search(r'^\+?\d{10,15}$', re.sub(r'[\s\-()]', '', query)):
@@ -301,6 +304,87 @@ async def hudsonrock_lookup(phone: str) -> dict:
         logger.error(f"HudsonRock error: {e}")
     return None
 
+# ==================== CLI-ИНСТРУМЕНТЫ (БЕЗ ТАЙМАУТА) ====================
+
+async def phoneinfoga_lookup(phone: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "phoneinfoga", "scan", "-n", phone, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        if stdout:
+            data = json.loads(stdout)
+            return {
+                "country": data.get('country', '—'),
+                "carrier": data.get('carrier', '—'),
+                "line_type": data.get('line_type', '—')
+            }
+    except Exception as e:
+        logger.error(f"PhoneInfoga error: {e}")
+    return None
+
+async def sherlock_lookup(username: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sherlock", username,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        if stdout:
+            return {"result": stdout.decode()[:500]}
+    except Exception as e:
+        logger.error(f"Sherlock error: {e}")
+    return None
+
+async def holehe_lookup(email: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "holehe", email, "--only-used",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        if stdout:
+            return {"result": stdout.decode()[:500]}
+    except Exception as e:
+        logger.error(f"Holehe error: {e}")
+    return None
+
+async def theharvester_lookup(domain: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "theHarvester", "-d", domain, "-l", "10",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        if stdout:
+            return {"result": stdout.decode()[:500]}
+    except Exception as e:
+        logger.error(f"TheHarvester error: {e}")
+    return None
+
+async def maigret_lookup(username: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "maigret", username, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+        if stdout:
+            data = json.loads(stdout)
+            return {
+                "sites_found": len(data.get('sites', {})),
+                "result": json.dumps(data, ensure_ascii=False)[:300]
+            }
+    except Exception as e:
+        logger.error(f"Maigret error: {e}")
+    return None
+
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
@@ -318,6 +402,7 @@ async def global_lookup(query: str) -> dict:
     total = 0
     
     if qtype == "phone":
+        # API
         veriphone = await veriphone_lookup(query)
         if veriphone:
             result["sources"]["veriphone"] = veriphone
@@ -351,6 +436,35 @@ async def global_lookup(query: str) -> dict:
         hudson = await hudsonrock_lookup(query)
         if hudson:
             result["sources"]["hudsonrock"] = hudson
+            total += 1
+        
+        # CLI
+        phoneinfoga = await phoneinfoga_lookup(query)
+        if phoneinfoga:
+            result["sources"]["phoneinfoga"] = phoneinfoga
+            total += 1
+    
+    if qtype == "email":
+        holehe = await holehe_lookup(query)
+        if holehe:
+            result["sources"]["holehe"] = holehe
+            total += 1
+    
+    if qtype == "username":
+        sherlock = await sherlock_lookup(query)
+        if sherlock:
+            result["sources"]["sherlock"] = sherlock
+            total += 1
+        
+        maigret = await maigret_lookup(query)
+        if maigret:
+            result["sources"]["maigret"] = maigret
+            total += 1
+    
+    if qtype == "domain":
+        theharvester = await theharvester_lookup(query)
+        if theharvester:
+            result["sources"]["theharvester"] = theharvester
             total += 1
     
     result["total_results"] = total
@@ -800,7 +914,7 @@ def callback_handler(call):
             "• Никнейм: username\n"
             "• IP-адрес: 8.8.8.8\n"
             "• Любой текст\n\n"
-            "ℹ️ Бот использует 10+ OSINT-источников.",
+            "ℹ️ Бот использует 15+ OSINT-источников.",
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",

@@ -13,6 +13,8 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import telebot
 from telebot import types
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # ========== НАСТРОЙКИ (из переменных окружения) ==========
 TOKEN = os.environ.get("TOKEN")
@@ -25,19 +27,50 @@ OMKAR_KEY = os.environ.get("OMKAR_KEY")
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
 ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 
-# Проверка наличия токена
 if not TOKEN:
-    raise ValueError("❌ TOKEN не установлен! Добавьте переменную окружения TOKEN на Render.")
+    raise ValueError("❌ TOKEN не установлен!")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ==================== ХРАНИЛИЩЕ ОТЧЁТОВ ====================
+reports = {}  # {report_id: {"query": str, "data": dict, "html": str, "created": timestamp}}
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 bot.remove_webhook()
 
-# Хранилище результатов для HTML-отчётов
-user_results = {}
+# ==================== HTTP-СЕРВЕР ДЛЯ ОТОБРАЖЕНИЯ ОТЧЁТОВ ====================
+
+class ReportHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith('/report/'):
+            report_id = self.path.replace('/report/', '').split('?')[0]
+            if report_id in reports:
+                html = reports[report_id]["html"]
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(html.encode('utf-8'))
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"Report not found")
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not found")
+
+def run_http_server():
+    port = int(os.environ.get('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), ReportHandler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.daemon = True
+    thread.start()
+    logger.info(f"✅ HTTP-сервер запущен на порту {port}")
+
+# Запускаем HTTP-сервер для отчётов
+run_http_server()
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -130,8 +163,6 @@ def detect_query_type(query: str) -> str:
     return "text"
 
 # ==================== ФУНКЦИИ ПОИСКА ====================
-
-# ===== ПО НОМЕРУ =====
 
 async def veriphone_lookup(phone: str) -> dict:
     if not VERIPHONE_KEY:
@@ -275,8 +306,6 @@ async def hudsonrock_lookup(phone: str) -> dict:
         logger.error(f"HudsonRock error: {e}")
     return None
 
-# ===== НОВЫЕ API ДЛЯ ПОЧТЫ (БЕЗ КЛЮЧА) =====
-
 async def emailrep_lookup(email: str) -> dict:
     try:
         url = f"https://emailrep.io/{email}"
@@ -353,8 +382,6 @@ async def bloombox_lookup(email: str) -> dict:
     except Exception as e:
         logger.error(f"Bloombox error: {e}")
     return None
-
-# ===== НОВЫЕ API ДЛЯ TELEGRAM (БЕЗ КЛЮЧА) =====
 
 async def tg_bot_retrieval_lookup(username: str) -> dict:
     try:
@@ -437,7 +464,6 @@ async def global_lookup(query: str) -> dict:
     
     total = 0
     
-    # ===== ДЛЯ НОМЕРА =====
     if qtype == "phone":
         veriphone = await veriphone_lookup(query)
         if veriphone:
@@ -474,7 +500,6 @@ async def global_lookup(query: str) -> dict:
             result["sources"]["hudsonrock"] = hudson
             total += 1
     
-    # ===== ДЛЯ EMAIL =====
     if qtype == "email":
         emailrep = await emailrep_lookup(query)
         if emailrep:
@@ -496,7 +521,6 @@ async def global_lookup(query: str) -> dict:
             result["sources"]["bloombox"] = bloombox
             total += 1
     
-    # ===== ДЛЯ TELEGRAM USERNAME =====
     if qtype == "username" and query.startswith('@'):
         tg_bot = await tg_bot_retrieval_lookup(query)
         if tg_bot:
@@ -508,7 +532,6 @@ async def global_lookup(query: str) -> dict:
             result["sources"]["tginfo"] = tginfo
             total += 1
     
-    # ===== ДЛЯ ВСЕХ ТИПОВ =====
     web_results = await duckduckgo_search(query)
     if web_results:
         result["sources"]["web"] = web_results
@@ -519,7 +542,7 @@ async def global_lookup(query: str) -> dict:
 
 # ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
-def generate_html_report(query: str, data: dict) -> str:
+def generate_html_report(query: str, data: dict, report_id: str) -> str:
     sources = data.get("sources", {})
     qtype = data.get("type", "text")
     total = data.get("total_results", 0)
@@ -538,6 +561,8 @@ def generate_html_report(query: str, data: dict) -> str:
             else:
                 all_results.append({"title": str(items), "source": source_name})
     
+    base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://otob-bot.onrender.com")
+    
     html = f"""
 <!DOCTYPE html>
 <html lang="ru">
@@ -547,43 +572,153 @@ def generate_html_report(query: str, data: dict) -> str:
     <title>OTOB — Osint Tool Olimpov Bot</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ background: #0d0d0d; color: #b0b0b0; font-family: 'Segoe UI', sans-serif; padding: 30px 20px; line-height: 1.6; }}
-        .container {{ max-width: 1000px; margin: 0 auto; background: #161616; border-radius: 10px; padding: 30px 35px; border: 1px solid #2a2a2a; }}
-        .header {{ border-bottom: 1px solid #2a2a2a; padding-bottom: 18px; margin-bottom: 22px; display: flex; justify-content: space-between; flex-wrap: wrap; }}
-        .header h1 {{ font-size: 24px; font-weight: 600; color: #c8c8c8; }}
-        .header h1 span {{ color: #6a6a6a; }}
-        .header .sub {{ color: #6a6a6a; font-size: 13px; }}
-        .badge {{ display: inline-block; background: #222222; padding: 3px 12px; border-radius: 4px; font-size: 12px; color: #8a8a8a; border: 1px solid #333333; }}
+        body {{
+            background: #0d0d0d;
+            color: #b0b0b0;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            padding: 30px 20px;
+            line-height: 1.6;
+            min-height: 100vh;
+        }}
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+            background: #161616;
+            border-radius: 10px;
+            padding: 30px 35px;
+            border: 1px solid #2a2a2a;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.9);
+            position: relative;
+        }}
+        /* ===== ВОДЯНОЙ ЗНАК (глаз в лупе + OTOB) ===== */
+        .watermark {{
+            position: absolute;
+            top: 20px;
+            left: 25px;
+            z-index: 10;
+            opacity: 0.25;
+            user-select: none;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        .watermark svg {{
+            width: 60px;
+            height: 60px;
+            filter: drop-shadow(0 0 10px rgba(0,0,0,0.5));
+        }}
+        .watermark .text {{
+            color: #4a4a4a;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            margin-top: 2px;
+            text-transform: uppercase;
+            font-family: 'Segoe UI', sans-serif;
+        }}
+        .header {{
+            border-bottom: 1px solid #2a2a2a;
+            padding-bottom: 18px;
+            margin-bottom: 22px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            padding-left: 80px;
+        }}
+        .header h1 {{
+            font-size: 24px;
+            font-weight: 600;
+            color: #c8c8c8;
+        }}
+        .header h1 span {{
+            color: #6a6a6a;
+        }}
+        .header .sub {{
+            color: #6a6a6a;
+            font-size: 13px;
+            margin-top: 4px;
+        }}
+        .badge {{
+            display: inline-block;
+            background: #222222;
+            padding: 3px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #8a8a8a;
+            border: 1px solid #333333;
+        }}
         .badge-success {{ background: #1a2a1a; color: #7aaa7a; border-color: #2a3a2a; }}
-        .result-item {{ margin: 12px 0; padding: 14px 18px; background: #121212; border-radius: 6px; border-left: 3px solid #2a2a2a; }}
-        .result-item .title {{ font-size: 16px; font-weight: 500; color: #c0c0c0; }}
-        .result-item .text {{ font-size: 14px; color: #8a8a8a; margin-top: 6px; }}
-        .result-item .extra {{ font-size: 13px; color: #6a6a6a; margin-top: 4px; }}
-        .result-item .index {{ display: inline-block; background: #1a1a1a; color: #5a5a5a; font-size: 12px; padding: 1px 10px; border-radius: 4px; margin-right: 10px; }}
-        .source-tag {{ display: inline-block; background: #1a1a1a; color: #5a5a5a; font-size: 10px; padding: 1px 8px; border-radius: 3px; margin-left: 10px; border: 1px solid #262626; }}
+        .result-item {{
+            margin: 12px 0;
+            padding: 14px 18px;
+            background: #121212;
+            border-radius: 6px;
+            border-left: 3px solid #2a2a2a;
+        }}
+        .result-item .title {{
+            font-size: 16px;
+            font-weight: 500;
+            color: #c0c0c0;
+        }}
+        .result-item .title a {{
+            color: #8a8a8a;
+            text-decoration: none;
+            border-bottom: 1px dotted #3a3a3a;
+        }}
+        .result-item .title a:hover {{
+            color: #aaaaaa;
+        }}
+        .result-item .text {{
+            font-size: 14px;
+            color: #8a8a8a;
+            margin-top: 6px;
+        }}
+        .result-item .extra {{
+            font-size: 13px;
+            color: #6a6a6a;
+            margin-top: 4px;
+        }}
+        .result-item .index {{
+            display: inline-block;
+            background: #1a1a1a;
+            color: #5a5a5a;
+            font-size: 12px;
+            padding: 1px 10px;
+            border-radius: 4px;
+            margin-right: 10px;
+        }}
+        .source-tag {{
+            display: inline-block;
+            background: #1a1a1a;
+            color: #5a5a5a;
+            font-size: 10px;
+            padding: 1px 8px;
+            border-radius: 3px;
+            margin-left: 10px;
+            border: 1px solid #262626;
+        }}
         .empty {{ color: #555555; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
         .stats {{ margin-top: 20px; padding: 12px 18px; background: #121212; border-radius: 6px; border: 1px solid #1a1a1a; color: #6a6a6a; font-size: 13px; text-align: center; }}
         .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #1e1e1e; font-size: 12px; color: #4a4a4a; text-align: center; }}
         .footer a {{ color: #6a6a6a; text-decoration: none; }}
-        .watermark {{ position: fixed; bottom: 30px; left: 30px; z-index: 1000; opacity: 0.15; user-select: none; pointer-events: none; display: flex; flex-direction: column; align-items: center; }}
-        .watermark svg {{ width: 80px; height: 80px; }}
-        .watermark .text {{ color: #3a3a3a; font-size: 14px; font-weight: 700; letter-spacing: 3px; margin-top: 4px; text-transform: uppercase; }}
-        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header h1 {{ font-size: 20px; }} .watermark svg {{ width: 50px; height: 50px; }} .watermark .text {{ font-size: 10px; }} }}
+        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header {{ padding-left: 0; padding-top: 70px; }} .watermark {{ top: 10px; left: 15px; }} .watermark svg {{ width: 40px; height: 40px; }} .watermark .text {{ font-size: 10px; }} }}
     </style>
 </head>
 <body>
-    <div class="watermark">
-        <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="42" cy="42" r="28" stroke="#4a4a4a" stroke-width="4" fill="none"/>
-            <line x1="62" y1="62" x2="88" y2="88" stroke="#4a4a4a" stroke-width="6" stroke-linecap="round"/>
-            <ellipse cx="42" cy="42" rx="18" ry="14" stroke="#4a4a4a" stroke-width="2" fill="none"/>
-            <circle cx="42" cy="42" r="6" stroke="#4a4a4a" stroke-width="2" fill="none"/>
-            <circle cx="42" cy="42" r="2" fill="#4a4a4a"/>
-            <circle cx="38" cy="38" r="3" fill="#4a4a4a" opacity="0.3"/>
-        </svg>
-        <div class="text">OTOB</div>
-    </div>
     <div class="container">
+        <div class="watermark">
+            <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="42" cy="42" r="28" stroke="#4a4a4a" stroke-width="4" fill="none"/>
+                <line x1="62" y1="62" x2="88" y2="88" stroke="#4a4a4a" stroke-width="6" stroke-linecap="round"/>
+                <ellipse cx="42" cy="42" rx="18" ry="14" stroke="#4a4a4a" stroke-width="2" fill="none"/>
+                <circle cx="42" cy="42" r="6" stroke="#4a4a4a" stroke-width="2" fill="none"/>
+                <circle cx="42" cy="42" r="2" fill="#4a4a4a"/>
+                <circle cx="38" cy="38" r="3" fill="#4a4a4a" opacity="0.3"/>
+            </svg>
+            <div class="text">OTOB</div>
+        </div>
         <div class="header">
             <div>
                 <h1>OTOB <span>Osint Tool Olimpov Bot</span></h1>
@@ -838,7 +973,6 @@ def callback_handler(call):
         )
         return
     
-    # ===== ГЛОБАЛЬНЫЙ ПОИСК =====
     if call.data == "global_search":
         bot.edit_message_text(
             "🌐 *Глобальный поиск*\n\n"
@@ -859,7 +993,6 @@ def callback_handler(call):
         )
         return
     
-    # ===== ПОИСК ПО EMAIL =====
     if call.data == "email_search":
         bot.edit_message_text(
             "📧 *Проверка email*\n\n"
@@ -874,7 +1007,6 @@ def callback_handler(call):
         )
         return
     
-    # ===== ПОИСК ПО ТЕЛЕФОНУ =====
     if call.data == "phone_search":
         bot.edit_message_text(
             "📱 *Проверка телефона*\n\n"
@@ -889,7 +1021,6 @@ def callback_handler(call):
         )
         return
     
-    # ===== ПОИСК ПО USERNAME =====
     if call.data == "username_search":
         bot.edit_message_text(
             "👤 *Поиск по username*\n\n"
@@ -904,40 +1035,37 @@ def callback_handler(call):
         )
         return
 
-# ==================== КНОПКА ДЛЯ HTML-ОТЧЁТА ====================
+# ==================== КНОПКА ДЛЯ ОТКРЫТИЯ ОТЧЁТА ====================
 
-@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("html_"))
-def html_callback(call):
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("open_"))
+def open_report_callback(call):
     bot.answer_callback_query(call.id)
     
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
+    report_id = call.data.replace("open_", "")
     
-    if chat_id not in user_results:
-        bot.send_message(chat_id, "❌ Данные не найдены. Повторите поиск.")
+    if report_id not in reports:
+        bot.send_message(call.message.chat.id, "❌ Отчёт не найден. Повторите поиск.")
         return
     
-    query = user_results[chat_id]["query"]
-    data = user_results[chat_id]["data"]
+    base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://otob-bot.onrender.com")
+    report_url = f"{base_url}/report/{report_id}"
     
-    html_content = generate_html_report(query, data)
-    filename = f"otob_report_{user_id}_{int(datetime.now().timestamp())}.html"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📄 Открыть отчёт в браузере", url=report_url),
+        types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
+    )
     
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html_content)
-    
-    with open(filename, "rb") as f:
-        bot.send_document(
-            chat_id,
-            f,
-            caption=f"📄 *OTOB — Osint Tool Olimpov Bot*\n\n"
-                    f"🔍 Запрос: `{query}`\n"
-                    f"📊 Найдено: {data.get('total_results', 0)} результатов\n\n"
-                    f"💡 Скачайте и откройте в браузере.",
-            parse_mode="Markdown"
-        )
-    
-    os.remove(filename)
+    bot.edit_message_text(
+        f"✅ *Поиск завершён!*\n\n"
+        f"🔍 Запрос: `{call.message.text}`\n"
+        f"📊 Найдено: {reports[report_id]['data'].get('total_results', 0)} результатов\n\n"
+        f"📄 Нажмите кнопку ниже, чтобы открыть полный отчёт в браузере.",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
 
 # ==================== ОБРАБОТЧИК ТЕКСТА ====================
 
@@ -965,13 +1093,30 @@ def handle_text(message):
         total = data.get("total_results", 0)
         remaining = use_search(user_id)
         
-        # Сохраняем результаты для HTML-отчёта
-        user_results[chat_id] = {"query": text, "data": data}
+        # Генерируем уникальный ID для отчёта
+        report_id = f"{user_id}_{int(datetime.now().timestamp())}"
         
-        # Отправляем краткое сообщение с кнопкой
+        # Генерируем HTML
+        html = generate_html_report(text, data, report_id)
+        
+        # Сохраняем отчёт
+        reports[report_id] = {
+            "query": text,
+            "data": data,
+            "html": html,
+            "created": datetime.now().timestamp()
+        }
+        
+        # Удаляем старые отчёты (старше 1 часа)
+        current_time = datetime.now().timestamp()
+        for rid in list(reports.keys()):
+            if current_time - reports[rid]["created"] > 3600:
+                del reports[rid]
+        
+        # Отправляем сообщение с кнопкой
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
-            types.InlineKeyboardButton("📄 Скачать HTML-отчёт", callback_data=f"html_{chat_id}"),
+            types.InlineKeyboardButton("📄 Открыть отчёт", callback_data=f"open_{report_id}"),
             types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
         )
         
@@ -980,7 +1125,7 @@ def handle_text(message):
             f"🔍 Запрос: `{text}`\n"
             f"📊 Найдено: **{total}** результатов\n"
             f"🔍 Осталось поисков: **{remaining}/3**\n\n"
-            f"📄 Нажмите кнопку ниже, чтобы скачать полный отчёт в формате HTML.",
+            f"📄 Нажмите кнопку ниже, чтобы открыть полный отчёт.",
             chat_id,
             msg.message_id,
             parse_mode="Markdown",

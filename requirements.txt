@@ -1,0 +1,6 @@
+python-telegram-bot==20.7
+aiohttp==3.9.1
+beautifulsoup4==4.12.2
+lxml==4.9.3
+phonenumbers==8.13.29
+dnspython==2.4.2

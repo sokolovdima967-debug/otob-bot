@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
+# Убираем возможный конфликт с другими экземплярами
+bot.remove_webhook()
+
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -331,6 +334,111 @@ async def global_lookup(query: str) -> dict:
     
     return result
 
+# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
+
+def generate_html_report(query: str, data: dict) -> str:
+    sources = data.get("sources", {})
+    qtype = data.get("type", "text")
+    
+    all_results = []
+    for source_name, items in sources.items():
+        if items:
+            for item in items:
+                all_results.append(item)
+    all_results = all_results[:25]
+    
+    html = f"""
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTOB — Osint Tool Olimpov Bot</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ background: #0d0d0d; color: #b0b0b0; font-family: 'Segoe UI', sans-serif; padding: 30px 20px; line-height: 1.6; }}
+        .container {{ max-width: 1000px; margin: 0 auto; background: #161616; border-radius: 10px; padding: 30px 35px; border: 1px solid #2a2a2a; }}
+        .header {{ border-bottom: 1px solid #2a2a2a; padding-bottom: 18px; margin-bottom: 22px; display: flex; justify-content: space-between; flex-wrap: wrap; }}
+        .header h1 {{ font-size: 24px; font-weight: 600; color: #c8c8c8; }}
+        .header h1 span {{ color: #6a6a6a; }}
+        .header .sub {{ color: #6a6a6a; font-size: 13px; }}
+        .badge {{ display: inline-block; background: #222222; padding: 3px 12px; border-radius: 4px; font-size: 12px; color: #8a8a8a; border: 1px solid #333333; }}
+        .badge-success {{ background: #1a2a1a; color: #7aaa7a; border-color: #2a3a2a; }}
+        .result-item {{ margin: 12px 0; padding: 14px 18px; background: #121212; border-radius: 6px; border-left: 3px solid #2a2a2a; }}
+        .result-item .title {{ font-size: 16px; font-weight: 500; color: #c0c0c0; }}
+        .result-item .title a {{ color: #8a8a8a; text-decoration: none; border-bottom: 1px dotted #3a3a3a; }}
+        .result-item .text {{ font-size: 14px; color: #8a8a8a; margin-top: 6px; }}
+        .result-item .extra {{ font-size: 13px; color: #6a6a6a; margin-top: 4px; }}
+        .result-item .index {{ display: inline-block; background: #1a1a1a; color: #5a5a5a; font-size: 12px; padding: 1px 10px; border-radius: 4px; margin-right: 10px; }}
+        .source-tag {{ display: inline-block; background: #1a1a1a; color: #5a5a5a; font-size: 10px; padding: 1px 8px; border-radius: 3px; margin-left: 10px; border: 1px solid #262626; }}
+        .empty {{ color: #555555; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
+        .stats {{ margin-top: 20px; padding: 12px 18px; background: #121212; border-radius: 6px; border: 1px solid #1a1a1a; color: #6a6a6a; font-size: 13px; text-align: center; }}
+        .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #1e1e1e; font-size: 12px; color: #4a4a4a; text-align: center; }}
+        .footer a {{ color: #6a6a6a; text-decoration: none; }}
+        .watermark {{ position: fixed; bottom: 30px; left: 30px; z-index: 1000; opacity: 0.15; user-select: none; pointer-events: none; display: flex; flex-direction: column; align-items: center; }}
+        .watermark svg {{ width: 80px; height: 80px; }}
+        .watermark .text {{ color: #3a3a3a; font-size: 14px; font-weight: 700; letter-spacing: 3px; margin-top: 4px; text-transform: uppercase; }}
+        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header h1 {{ font-size: 20px; }} .watermark svg {{ width: 50px; height: 50px; }} .watermark .text {{ font-size: 10px; }} }}
+    </style>
+</head>
+<body>
+    <div class="watermark">
+        <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="42" cy="42" r="28" stroke="#4a4a4a" stroke-width="4" fill="none"/>
+            <line x1="62" y1="62" x2="88" y2="88" stroke="#4a4a4a" stroke-width="6" stroke-linecap="round"/>
+            <ellipse cx="42" cy="42" rx="18" ry="14" stroke="#4a4a4a" stroke-width="2" fill="none"/>
+            <circle cx="42" cy="42" r="6" stroke="#4a4a4a" stroke-width="2" fill="none"/>
+            <circle cx="42" cy="42" r="2" fill="#4a4a4a"/>
+            <circle cx="38" cy="38" r="3" fill="#4a4a4a" opacity="0.3"/>
+        </svg>
+        <div class="text">OTOB</div>
+    </div>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>OTOB <span>Osint Tool Olimpov Bot</span></h1>
+                <div class="sub">Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
+            </div>
+            <div><span class="badge badge-success">найдено: {len(all_results)}</span></div>
+        </div>
+"""
+    
+    if all_results:
+        for idx, item in enumerate(all_results, 1):
+            title_text = item.get('title', '—')[:60]
+            link = item.get('link', '')
+            text = item.get('text', '')[:200]
+            extra = item.get('extra', '')
+            source = item.get('_source', '')
+            
+            html += f"""
+        <div class="result-item">
+            <div class="title">
+                <span class="index">#{idx}</span>
+                {f'<a href="{link}" target="_blank">{title_text}</a>' if link else title_text}
+                <span class="source-tag">{source}</span>
+            </div>
+"""
+            if text and text != '—':
+                html += f"            <div class=\"text\">{text}</div>\n"
+            if extra:
+                html += f"            <div class=\"extra\">📎 {extra}</div>\n"
+            html += "        </div>\n"
+        
+        html += f"""
+        <div class="stats">📊 Найдено <strong>{len(all_results)}</strong> результатов из <strong>{len(sources)}</strong> источников</div>
+"""
+    else:
+        html += '<div class="empty">❌ Ничего не найдено</div>'
+    
+    html += f"""
+        <div class="footer">🛡️ OTOB — Osint Tool Olimpov Bot · <a href="https://t.me/Osint_Tool_Olimpov_bot" target="_blank">@Osint_Tool_Olimpov_bot</a></div>
+    </div>
+</body>
+</html>
+"""
+    return html
+
 # ==================== ФОРМАТИРОВАНИЕ РЕЗУЛЬТАТА ====================
 
 def format_global_result(data: dict) -> str:
@@ -346,6 +454,7 @@ def format_global_result(data: dict) -> str:
     for source_name, items in sources.items():
         if items:
             for item in items:
+                item['_source'] = source_name
                 all_results.append(item)
     
     all_results = all_results[:25]
@@ -377,7 +486,6 @@ def format_global_result(data: dict) -> str:
 @bot.message_handler(commands=['start'])
 def start_command(message):
     user_id = message.from_user.id
-    user_data = get_user(user_id, message.from_user.username or "Unknown")
     remaining = get_remaining(user_id)
     
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -541,11 +649,9 @@ def handle_text(message):
         bot.reply_to(message, "❌ *Лимит поисков исчерпан!*", parse_mode="Markdown")
         return
     
-    # Отправляем сообщение о начале поиска
     msg = bot.reply_to(message, "⏳ OTOB выполняет поиск по 30+ сайтам...")
     
     try:
-        # Запускаем асинхронный поиск
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         data = loop.run_until_complete(global_lookup(text))
@@ -556,6 +662,7 @@ def handle_text(message):
         reply += f"\n\n🔍 Осталось: {remaining}/3"
         
         markup = types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("📄 Скачать HTML-отчёт", callback_data=f"html_{text[:50]}"),
             types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="back")
         )
         
@@ -566,6 +673,11 @@ def handle_text(message):
             parse_mode="Markdown",
             reply_markup=markup
         )
+        
+        # Сохраняем результат для генерации HTML
+        bot.user_data = getattr(bot, 'user_data', {})
+        bot.user_data[message.chat.id] = {"query": text, "data": data}
+        
     except Exception as e:
         bot.edit_message_text(
             f"⚠️ Ошибка: {str(e)[:100]}",
@@ -573,9 +685,44 @@ def handle_text(message):
             msg.message_id
         )
 
+# ==================== ОБРАБОТЧИК HTML-ОТЧЁТА ====================
+
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("html_"))
+def html_callback(call):
+    bot.answer_callback_query(call.id)
+    
+    user_data = getattr(bot, 'user_data', {})
+    if call.message.chat.id not in user_data:
+        bot.send_message(call.message.chat.id, "❌ Данные не найдены. Повторите поиск.")
+        return
+    
+    query = user_data[call.message.chat.id]["query"]
+    data = user_data[call.message.chat.id]["data"]
+    
+    html_content = generate_html_report(query, data)
+    filename = f"otob_report_{call.from_user.id}_{int(datetime.now().timestamp())}.html"
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    
+    with open(filename, "rb") as f:
+        bot.send_document(
+            call.message.chat.id,
+            f,
+            caption=f"📄 *OTOB — Osint Tool Olimpov Bot*\n\n🔍 Запрос: `{query}`",
+            parse_mode="Markdown"
+        )
+    
+    os.remove(filename)
+
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
     init_db()
     logger.info("🚀 OTOB бот запускается на telebot...")
-    bot.infinity_polling()
+    
+    # Удаляем вебхук, чтобы избежать конфликта
+    bot.remove_webhook()
+    
+    # Запускаем с увеличенным таймаутом
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)

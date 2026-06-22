@@ -551,16 +551,21 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     qtype = data.get("type", "text")
     total = data.get("total_results", 0)
     
+    # Собираем ВСЕ результаты из ВСЕХ источников
     all_results = []
     for source_name, items in sources.items():
         if items:
             if isinstance(items, list):
                 for item in items:
                     if isinstance(item, dict):
+                        if 'source' not in item:
+                            item['source'] = source_name
                         all_results.append(item)
                     else:
                         all_results.append({"title": str(item), "source": source_name})
             elif isinstance(items, dict):
+                if 'source' not in items:
+                    items['source'] = source_name
                 all_results.append(items)
             else:
                 all_results.append({"title": str(items), "source": source_name})
@@ -575,8 +580,8 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
-            background: #0d0d0d;
-            color: #b0b0b0;
+            background: #1a1a1a;
+            color: #c8c8c8;
             font-family: 'Segoe UI', system-ui, sans-serif;
             padding: 30px 20px;
             line-height: 1.6;
@@ -585,11 +590,11 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         .container {{
             max-width: 1000px;
             margin: 0 auto;
-            background: #161616;
+            background: #2a2a2a;
             border-radius: 10px;
             padding: 30px 35px;
-            border: 1px solid #2a2a2a;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.9);
+            border: 1px solid #3a3a3a;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.7);
             position: relative;
         }}
         .watermark {{
@@ -597,7 +602,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             top: 20px;
             left: 25px;
             z-index: 10;
-            opacity: 0.25;
+            opacity: 0.2;
             user-select: none;
             pointer-events: none;
             display: flex;
@@ -607,10 +612,10 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         .watermark svg {{
             width: 60px;
             height: 60px;
-            filter: drop-shadow(0 0 10px rgba(0,0,0,0.5));
+            filter: drop-shadow(0 0 10px rgba(0,0,0,0.3));
         }}
         .watermark .text {{
-            color: #4a4a4a;
+            color: #5a5a5a;
             font-size: 14px;
             font-weight: 700;
             letter-spacing: 3px;
@@ -619,7 +624,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             font-family: 'Segoe UI', sans-serif;
         }}
         .header {{
-            border-bottom: 1px solid #2a2a2a;
+            border-bottom: 1px solid #3a3a3a;
             padding-bottom: 18px;
             margin-bottom: 22px;
             display: flex;
@@ -631,60 +636,60 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         .header h1 {{
             font-size: 24px;
             font-weight: 600;
-            color: #c8c8c8;
+            color: #e0e0e0;
         }}
         .header h1 span {{
-            color: #6a6a6a;
+            color: #888888;
         }}
         .header .sub {{
-            color: #6a6a6a;
+            color: #888888;
             font-size: 13px;
             margin-top: 4px;
         }}
         .badge {{
             display: inline-block;
-            background: #222222;
+            background: #333333;
             padding: 3px 12px;
             border-radius: 4px;
             font-size: 12px;
-            color: #8a8a8a;
-            border: 1px solid #333333;
+            color: #aaaaaa;
+            border: 1px solid #444444;
         }}
-        .badge-success {{ background: #1a2a1a; color: #7aaa7a; border-color: #2a3a2a; }}
+        .badge-success {{ background: #1a3a1a; color: #8acc8a; border-color: #2a5a2a; }}
         .result-item {{
             margin: 12px 0;
             padding: 14px 18px;
-            background: #121212;
+            background: #222222;
             border-radius: 6px;
-            border-left: 3px solid #2a2a2a;
+            border-left: 3px solid #3a3a3a;
         }}
         .result-item .title {{
             font-size: 16px;
             font-weight: 500;
-            color: #c0c0c0;
+            color: #d0d0d0;
         }}
         .result-item .title a {{
-            color: #8a8a8a;
+            color: #9ab0d0;
             text-decoration: none;
-            border-bottom: 1px dotted #3a3a3a;
+            border-bottom: 1px dotted #4a5a6a;
         }}
         .result-item .title a:hover {{
-            color: #aaaaaa;
+            color: #b0c8e0;
         }}
         .result-item .text {{
             font-size: 14px;
-            color: #8a8a8a;
+            color: #aaaaaa;
             margin-top: 6px;
         }}
         .result-item .extra {{
             font-size: 13px;
-            color: #6a6a6a;
+            color: #888888;
             margin-top: 4px;
         }}
         .result-item .index {{
             display: inline-block;
-            background: #1a1a1a;
-            color: #5a5a5a;
+            background: #2a2a2a;
+            color: #777777;
             font-size: 12px;
             padding: 1px 10px;
             border-radius: 4px;
@@ -692,18 +697,19 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         }}
         .source-tag {{
             display: inline-block;
-            background: #1a1a1a;
-            color: #5a5a5a;
+            background: #2a2a2a;
+            color: #777777;
             font-size: 10px;
             padding: 1px 8px;
             border-radius: 3px;
             margin-left: 10px;
-            border: 1px solid #262626;
+            border: 1px solid #3a3a3a;
         }}
-        .empty {{ color: #555555; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
-        .stats {{ margin-top: 20px; padding: 12px 18px; background: #121212; border-radius: 6px; border: 1px solid #1a1a1a; color: #6a6a6a; font-size: 13px; text-align: center; }}
-        .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #1e1e1e; font-size: 12px; color: #4a4a4a; text-align: center; }}
-        .footer a {{ color: #6a6a6a; text-decoration: none; }}
+        .empty {{ color: #666666; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
+        .stats {{ margin-top: 20px; padding: 12px 18px; background: #222222; border-radius: 6px; border: 1px solid #2a2a2a; color: #888888; font-size: 13px; text-align: center; }}
+        .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #2a2a2a; font-size: 12px; color: #666666; text-align: center; }}
+        .footer a {{ color: #888888; text-decoration: none; }}
+        .footer a:hover {{ color: #aaaaaa; }}
         @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header {{ padding-left: 0; padding-top: 70px; }} .watermark {{ top: 10px; left: 15px; }} .watermark svg {{ width: 40px; height: 40px; }} .watermark .text {{ font-size: 10px; }} }}
     </style>
 </head>
@@ -711,12 +717,12 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     <div class="container">
         <div class="watermark">
             <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="42" cy="42" r="28" stroke="#4a4a4a" stroke-width="4" fill="none"/>
-                <line x1="62" y1="62" x2="88" y2="88" stroke="#4a4a4a" stroke-width="6" stroke-linecap="round"/>
-                <ellipse cx="42" cy="42" rx="18" ry="14" stroke="#4a4a4a" stroke-width="2" fill="none"/>
-                <circle cx="42" cy="42" r="6" stroke="#4a4a4a" stroke-width="2" fill="none"/>
-                <circle cx="42" cy="42" r="2" fill="#4a4a4a"/>
-                <circle cx="38" cy="38" r="3" fill="#4a4a4a" opacity="0.3"/>
+                <circle cx="42" cy="42" r="28" stroke="#5a5a5a" stroke-width="4" fill="none"/>
+                <line x1="62" y1="62" x2="88" y2="88" stroke="#5a5a5a" stroke-width="6" stroke-linecap="round"/>
+                <ellipse cx="42" cy="42" rx="18" ry="14" stroke="#5a5a5a" stroke-width="2" fill="none"/>
+                <circle cx="42" cy="42" r="6" stroke="#5a5a5a" stroke-width="2" fill="none"/>
+                <circle cx="42" cy="42" r="2" fill="#5a5a5a"/>
+                <circle cx="38" cy="38" r="3" fill="#5a5a5a" opacity="0.3"/>
             </svg>
             <div class="text">OTOB</div>
         </div>
@@ -729,12 +735,22 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         </div>
 """
     
+    # ===== ВСЕ РЕЗУЛЬТАТЫ С ДАННЫМИ =====
     if all_results:
         for idx, item in enumerate(all_results[:25], 1):
             title = item.get('title', '—')[:60]
             text = item.get('text', '')[:200]
             extra = item.get('extra', '')
             source = item.get('source', '')
+            
+            # Если есть вложенные данные — показываем их
+            details = []
+            for key, value in item.items():
+                if key not in ['title', 'text', 'extra', 'source', '_source'] and value:
+                    if isinstance(value, str) and value != '—':
+                        details.append(f"{key}: {value}")
+                    elif isinstance(value, list) and value:
+                        details.append(f"{key}: {', '.join(str(v) for v in value[:3])}")
             
             html += f"""
         <div class="result-item">
@@ -748,6 +764,9 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
                 html += f"            <div class=\"text\">{text}</div>\n"
             if extra:
                 html += f"            <div class=\"extra\">📎 {extra}</div>\n"
+            if details:
+                for detail in details[:3]:
+                    html += f"            <div class=\"extra\">• {detail}</div>\n"
             html += "        </div>\n"
         
         html += f"""

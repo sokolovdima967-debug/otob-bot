@@ -26,6 +26,7 @@ VERIPHONE_KEY = os.environ.get("VERIPHONE_KEY")
 OMKAR_KEY = os.environ.get("OMKAR_KEY")
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
 ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
+NUMBUSTER_KEY = os.environ.get("NUMBUSTER_KEY")  # Для NumBuster (если будет)
 
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
@@ -166,7 +167,178 @@ def detect_query_type(query: str) -> str:
         return "ip"
     return "text"
 
-# ==================== ФУНКЦИИ ПОИСКА ====================
+# ==================== НОВЫЕ OSINT-ИСТОЧНИКИ ====================
+
+# ----- 1. TelespotXX (парсинг) -----
+async def telespotxx_lookup(phone: str) -> dict:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        # Используем публичный API TelespotXX
+        url = f"https://telespotxx.com/api/search?q={clean}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=15) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data:
+                        return {
+                            "name": data.get('name', '—'),
+                            "address": data.get('address', '—'),
+                            "social": data.get('social', []),
+                            "source": "telespotxx"
+                        }
+    except Exception as e:
+        logger.error(f"TelespotXX error: {e}")
+    return None
+
+# ----- 2. PhoneInfoga (CLI) -----
+async def phoneinfoga_lookup(phone: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "phoneinfoga", "scan", "-n", phone, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if stdout:
+            data = json.loads(stdout)
+            return {
+                "country": data.get('country', '—'),
+                "carrier": data.get('carrier', '—'),
+                "line_type": data.get('line_type', '—'),
+                "source": "phoneinfoga"
+            }
+    except Exception as e:
+        logger.error(f"PhoneInfoga error: {e}")
+    return None
+
+# ----- 3. PhoneNumber-OSINT (CLI) -----
+async def phonenumber_osint_lookup(phone: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-m", "phonenumber_osint", phone,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if stdout:
+            data = stdout.decode()
+            return {
+                "operator": re.search(r'Operator: (.+)', data).group(1) if re.search(r'Operator: (.+)', data) else '—',
+                "region": re.search(r'Region: (.+)', data).group(1) if re.search(r'Region: (.+)', data) else '—',
+                "source": "phonenumber-osint"
+            }
+    except Exception as e:
+        logger.error(f"PhoneNumber-OSINT error: {e}")
+    return None
+
+# ----- 4. CB-PhoneHunter (CLI) -----
+async def cb_phonehunter_lookup(phone: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-m", "cb_phonehunter", phone,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if stdout:
+            data = stdout.decode()
+            return {
+                "truecaller": re.search(r'Truecaller: (.+)', data).group(1) if re.search(r'Truecaller: (.+)', data) else '—',
+                "whatsapp": re.search(r'WhatsApp: (.+)', data).group(1) if re.search(r'WhatsApp: (.+)', data) else '—',
+                "google_dorks": re.search(r'Google Dorks: (.+)', data).group(1) if re.search(r'Google Dorks: (.+)', data) else '—',
+                "source": "cb-phonehunter"
+            }
+    except Exception as e:
+        logger.error(f"CB-PhoneHunter error: {e}")
+    return None
+
+# ----- 5. CreepyEYE-Genesis (CLI) -----
+async def creepyeye_lookup(phone: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-m", "creepyeye", phone,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if stdout:
+            data = stdout.decode()
+            return {
+                "result": data[:200],
+                "source": "creepyeye"
+            }
+    except Exception as e:
+        logger.error(f"CreepyEYE error: {e}")
+    return None
+
+# ----- 6. Hudson Rock (без ключа) -----
+async def hudsonrock_lookup(phone: str) -> dict:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=15) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('total_results', 0) > 0:
+                        return {
+                            "found": True,
+                            "total": data.get('total_results', 0),
+                            "breaches": data.get('results', [])[:5],
+                            "source": "hudsonrock"
+                        }
+    except Exception as e:
+        logger.error(f"HudsonRock error: {e}")
+    return None
+
+# ----- 7. Numverify (с ключом) -----
+async def numverify_lookup(phone: str) -> dict:
+    if not NUMVERIFY_KEY:
+        return None
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('valid'):
+                        return {
+                            "country": data.get('country_name', '—'),
+                            "location": data.get('location', '—'),
+                            "carrier": data.get('carrier', '—'),
+                            "line_type": data.get('line_type', '—'),
+                            "source": "numverify"
+                        }
+    except Exception as e:
+        logger.error(f"Numverify error: {e}")
+    return None
+
+# ----- 8. AbstractAPI (с ключом) -----
+async def abstractapi_lookup(phone: str) -> dict:
+    if not ABSTRACT_API_KEY:
+        return None
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('valid'):
+                        return {
+                            "country": data.get('country', {}).get('name', '—'),
+                            "carrier": data.get('carrier', '—'),
+                            "location": data.get('location', '—'),
+                            "line_type": data.get('line_type', '—'),
+                            "source": "abstractapi"
+                        }
+    except Exception as e:
+        logger.error(f"AbstractAPI error: {e}")
+    return None
+
+# ==================== СУЩЕСТВУЮЩИЕ ФУНКЦИИ ====================
 
 async def veriphone_lookup(phone: str) -> dict:
     if not VERIPHONE_KEY:
@@ -183,7 +355,7 @@ async def veriphone_lookup(phone: str) -> dict:
                             "country": data.get('country', '—'),
                             "carrier": data.get('carrier', '—'),
                             "type": data.get('phone_type', '—'),
-                            "source": "veriphone.io"
+                            "source": "veriphone"
                         }
     except Exception as e:
         logger.error(f"Veriphone error: {e}")
@@ -205,54 +377,10 @@ async def omkarcloud_lookup(phone: str) -> dict:
                             "carrier": data.get('carrier', '—'),
                             "line_type": data.get('line_type', '—'),
                             "country_code": data.get('country_code', '—'),
-                            "source": "omkarcloud.com"
+                            "source": "omkarcloud"
                         }
     except Exception as e:
         logger.error(f"OmkarCloud error: {e}")
-    return None
-
-async def numverify_lookup(phone: str) -> dict:
-    if not NUMVERIFY_KEY:
-        return None
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('valid'):
-                        return {
-                            "country": data.get('country_name', '—'),
-                            "location": data.get('location', '—'),
-                            "carrier": data.get('carrier', '—'),
-                            "line_type": data.get('line_type', '—'),
-                            "source": "numverify.com"
-                        }
-    except Exception as e:
-        logger.error(f"Numverify error: {e}")
-    return None
-
-async def abstractapi_lookup(phone: str) -> dict:
-    if not ABSTRACT_API_KEY:
-        return None
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('valid'):
-                        return {
-                            "country": data.get('country', {}).get('name', '—'),
-                            "carrier": data.get('carrier', '—'),
-                            "location": data.get('location', '—'),
-                            "line_type": data.get('line_type', '—'),
-                            "source": "abstractapi.com"
-                        }
-    except Exception as e:
-        logger.error(f"AbstractAPI error: {e}")
     return None
 
 async def htmlweb_lookup(phone: str) -> dict:
@@ -269,7 +397,7 @@ async def htmlweb_lookup(phone: str) -> dict:
                             "operator": data.get('operator', '—'),
                             "region": data.get('region', '—'),
                             "timezone": data.get('timezone', '—'),
-                            "source": "htmlweb.ru"
+                            "source": "htmlweb"
                         }
     except Exception as e:
         logger.error(f"HTMLWeb error: {e}")
@@ -284,173 +412,12 @@ async def hlr_lookup(phone: str) -> dict:
                 if resp.status == 200:
                     data = await resp.text()
                     if 'OK' in data:
-                        return {"status": "✅ Активен", "source": "smsc.ru"}
+                        return {"status": "✅ Активен", "source": "hlr"}
                     else:
-                        return {"status": "❌ Не активен", "source": "smsc.ru"}
+                        return {"status": "❌ Не активен", "source": "hlr"}
     except Exception as e:
         logger.error(f"HLR error: {e}")
     return None
-
-async def hudsonrock_lookup(phone: str) -> dict:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('total_results', 0) > 0:
-                        return {
-                            "source": "HudsonRock",
-                            "found": True,
-                            "total": data.get('total_results', 0),
-                            "breaches": data.get('results', [])[:5]
-                        }
-    except Exception as e:
-        logger.error(f"HudsonRock error: {e}")
-    return None
-
-async def emailrep_lookup(email: str) -> dict:
-    try:
-        url = f"https://emailrep.io/{email}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "reputation": data.get('reputation', '—'),
-                        "suspicious": data.get('suspicious', False),
-                        "references": data.get('references', 0),
-                        "details": data.get('details', {}),
-                        "source": "emailrep.io"
-                    }
-    except Exception as e:
-        logger.error(f"EmailRep error: {e}")
-    return None
-
-async def hackmyip_breach_lookup(email: str) -> dict:
-    try:
-        url = f"https://hackmyip.com/api/breach?email={email}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('success'):
-                        breach_data = data.get('data', {})
-                        return {
-                            "breaches": breach_data.get('breaches', 0),
-                            "services": breach_data.get('services', []),
-                            "risk_score": breach_data.get('risk', {}).get('score', 0),
-                            "risk_level": breach_data.get('risk', {}).get('level', '—'),
-                            "passwords": breach_data.get('passwords', {}),
-                            "source": "hackmyip.com"
-                        }
-    except Exception as e:
-        logger.error(f"HackMyIP Breach error: {e}")
-    return None
-
-async def rapid_email_verifier_lookup(email: str) -> dict:
-    try:
-        url = f"https://rapid-email-verifier.fly.dev/api/validate?email={email}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "valid": data.get('valid', False),
-                        "domain": data.get('domain', '—'),
-                        "disposable": data.get('disposable', False),
-                        "mx": data.get('mx', False),
-                        "source": "rapid-email-verifier"
-                    }
-    except Exception as e:
-        logger.error(f"Rapid Email Verifier error: {e}")
-    return None
-
-async def bloombox_lookup(email: str) -> dict:
-    try:
-        url = f"https://bloombox.vercel.app/api/validate?email={email}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "valid": data.get('valid', False),
-                        "disposable": data.get('disposable', False),
-                        "free": data.get('free', False),
-                        "role": data.get('role', False),
-                        "mx": data.get('mx', False),
-                        "smtp": data.get('smtp', False),
-                        "source": "bloombox"
-                    }
-    except Exception as e:
-        logger.error(f"Bloombox error: {e}")
-    return None
-
-async def tg_bot_retrieval_lookup(username: str) -> dict:
-    try:
-        clean = username.lstrip('@')
-        url = f"https://tg-bot-retrieval-api.vercel.app/api/v1/bot/{clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "display_name": data.get('display_name', '—'),
-                        "description": data.get('description', '—'),
-                        "telegram_url": data.get('telegram_url', '—'),
-                        "avatar_url": data.get('avatar_url', '—'),
-                        "verified": data.get('verified', False),
-                        "source": "tg-bot-retrieval"
-                    }
-    except Exception as e:
-        logger.error(f"TGBotRetrieval error: {e}")
-    return None
-
-async def tginfo_lookup(username: str) -> dict:
-    try:
-        clean = username.lstrip('@')
-        url = f"https://tginfo.vercel.app/api/info/{clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "id": data.get('id', '—'),
-                        "username": data.get('username', '—'),
-                        "first_name": data.get('first_name', '—'),
-                        "last_name": data.get('last_name', '—'),
-                        "bio": data.get('bio', '—'),
-                        "type": data.get('type', '—'),
-                        "source": "tginfo"
-                    }
-    except Exception as e:
-        logger.error(f"Tginfo error: {e}")
-    return None
-
-async def duckduckgo_search(query: str) -> list:
-    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    results = []
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=15) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    for item in soup.select('.result')[:5]:
-                        title_elem = item.select_one('.result__title a')
-                        snippet_elem = item.select_one('.result__snippet')
-                        if title_elem:
-                            title = title_elem.get_text(strip=True)
-                            link = title_elem.get('href')
-                            if link and link.startswith('/'):
-                                link = 'https://duckduckgo.com' + link
-                            snippet = snippet_elem.get_text(strip=True) if snippet_elem else "Нет описания"
-                            results.append({'title': title, 'snippet': snippet, 'link': link})
-    except Exception as e:
-        logger.error(f"DuckDuckGo error: {e}")
-    return results
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
@@ -469,6 +436,7 @@ async def global_lookup(query: str) -> dict:
     total = 0
     
     if qtype == "phone":
+        # Существующие источники
         veriphone = await veriphone_lookup(query)
         if veriphone:
             result["sources"]["veriphone"] = veriphone
@@ -503,43 +471,32 @@ async def global_lookup(query: str) -> dict:
         if hudson:
             result["sources"]["hudsonrock"] = hudson
             total += 1
-    
-    if qtype == "email":
-        emailrep = await emailrep_lookup(query)
-        if emailrep:
-            result["sources"]["emailrep"] = emailrep
+        
+        # НОВЫЕ ИСТОЧНИКИ
+        telespotxx = await telespotxx_lookup(query)
+        if telespotxx:
+            result["sources"]["telespotxx"] = telespotxx
             total += 1
         
-        breach = await hackmyip_breach_lookup(query)
-        if breach:
-            result["sources"]["hackmyip_breach"] = breach
+        phoneinfoga = await phoneinfoga_lookup(query)
+        if phoneinfoga:
+            result["sources"]["phoneinfoga"] = phoneinfoga
             total += 1
         
-        validator = await rapid_email_verifier_lookup(query)
-        if validator:
-            result["sources"]["rapid_email_validator"] = validator
+        phonenumber_osint = await phonenumber_osint_lookup(query)
+        if phonenumber_osint:
+            result["sources"]["phonenumber_osint"] = phonenumber_osint
             total += 1
         
-        bloombox = await bloombox_lookup(query)
-        if bloombox:
-            result["sources"]["bloombox"] = bloombox
-            total += 1
-    
-    if qtype == "username" and query.startswith('@'):
-        tg_bot = await tg_bot_retrieval_lookup(query)
-        if tg_bot:
-            result["sources"]["tg_bot_retrieval"] = tg_bot
+        cb_phonehunter = await cb_phonehunter_lookup(query)
+        if cb_phonehunter:
+            result["sources"]["cb_phonehunter"] = cb_phonehunter
             total += 1
         
-        tginfo = await tginfo_lookup(query)
-        if tginfo:
-            result["sources"]["tginfo"] = tginfo
+        creepyeeye = await creepyeeye_lookup(query)
+        if creepyeeye:
+            result["sources"]["creepyeye"] = creepyeeye
             total += 1
-    
-    web_results = await duckduckgo_search(query)
-    if web_results:
-        result["sources"]["web"] = web_results
-        total += len(web_results)
     
     result["total_results"] = total
     return result
@@ -551,24 +508,22 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     qtype = data.get("type", "text")
     total = data.get("total_results", 0)
     
-    # Собираем ВСЕ результаты из ВСЕХ источников
+    # Собираем ВСЕ результаты
     all_results = []
     for source_name, items in sources.items():
         if items:
             if isinstance(items, list):
                 for item in items:
                     if isinstance(item, dict):
-                        if 'source' not in item:
-                            item['source'] = source_name
-                        all_results.append(item)
+                        item_copy = {k: v for k, v in item.items() if k not in ['source', '_source']}
+                        all_results.append(item_copy)
                     else:
-                        all_results.append({"title": str(item), "source": source_name})
+                        all_results.append({"title": str(item)})
             elif isinstance(items, dict):
-                if 'source' not in items:
-                    items['source'] = source_name
-                all_results.append(items)
+                items_copy = {k: v for k, v in items.items() if k not in ['source', '_source']}
+                all_results.append(items_copy)
             else:
-                all_results.append({"title": str(items), "source": source_name})
+                all_results.append({"title": str(items)})
     
     html = f"""
 <!DOCTYPE html>
@@ -695,16 +650,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border-radius: 4px;
             margin-right: 10px;
         }}
-        .source-tag {{
-            display: inline-block;
-            background: #2a2a2a;
-            color: #777777;
-            font-size: 10px;
-            padding: 1px 8px;
-            border-radius: 3px;
-            margin-left: 10px;
-            border: 1px solid #3a3a3a;
-        }}
         .empty {{ color: #666666; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
         .stats {{ margin-top: 20px; padding: 12px 18px; background: #222222; border-radius: 6px; border: 1px solid #2a2a2a; color: #888888; font-size: 13px; text-align: center; }}
         .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #2a2a2a; font-size: 12px; color: #666666; text-align: center; }}
@@ -735,29 +680,29 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         </div>
 """
     
-    # ===== ВСЕ РЕЗУЛЬТАТЫ С ДАННЫМИ =====
     if all_results:
         for idx, item in enumerate(all_results[:25], 1):
             title = item.get('title', '—')[:60]
             text = item.get('text', '')[:200]
             extra = item.get('extra', '')
-            source = item.get('source', '')
             
-            # Если есть вложенные данные — показываем их
             details = []
             for key, value in item.items():
-                if key not in ['title', 'text', 'extra', 'source', '_source'] and value:
-                    if isinstance(value, str) and value != '—':
+                if key not in ['title', 'text', 'extra'] and value:
+                    if isinstance(value, str) and value != '—' and value != '':
                         details.append(f"{key}: {value}")
                     elif isinstance(value, list) and value:
-                        details.append(f"{key}: {', '.join(str(v) for v in value[:3])}")
+                        details.append(f"{key}: {', '.join(str(v) for v in value[:5])}")
+                    elif isinstance(value, dict) and value:
+                        for k, v in value.items():
+                            if v and v != '—':
+                                details.append(f"{key}.{k}: {v}")
             
             html += f"""
         <div class="result-item">
             <div class="title">
                 <span class="index">#{idx}</span>
                 {title}
-                <span class="source-tag">{source}</span>
             </div>
 """
             if text and text != '—' and text != '':
@@ -765,7 +710,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             if extra:
                 html += f"            <div class=\"extra\">📎 {extra}</div>\n"
             if details:
-                for detail in details[:3]:
+                for detail in details[:6]:
                     html += f"            <div class=\"extra\">• {detail}</div>\n"
             html += "        </div>\n"
         
@@ -817,7 +762,7 @@ def functions_menu_keyboard():
     )
     return markup
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+# ==================== ОБРАБОТЧИКИ ====================
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
@@ -1081,11 +1026,9 @@ def handle_text(message):
         total = data.get("total_results", 0)
         remaining = use_search(user_id)
         
-        # Генерируем HTML
         report_id = f"{user_id}_{int(datetime.now().timestamp())}"
         html = generate_html_report(text, data, report_id)
         
-        # Сохраняем отчёт
         reports[report_id] = {
             "query": text,
             "data": data,
@@ -1093,18 +1036,15 @@ def handle_text(message):
             "created": datetime.now().timestamp()
         }
         
-        # Удаляем старые отчёты
         current_time = datetime.now().timestamp()
         for rid in list(reports.keys()):
             if current_time - reports[rid]["created"] > 3600:
                 del reports[rid]
         
-        # Сохраняем HTML во временный файл
         filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(html)
         
-        # Отправляем файл + текст
         with open(filename, "rb") as f:
             bot.send_document(
                 chat_id,
@@ -1117,8 +1057,6 @@ def handle_text(message):
             )
         
         os.remove(filename)
-        
-        # Удаляем сообщение "⏳ Выполняется..."
         bot.delete_message(chat_id, msg.message_id)
         
     except Exception as e:

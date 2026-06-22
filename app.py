@@ -1,22 +1,20 @@
 import os
 import asyncio
-import aiohttp
-import re
 import logging
+import re
 import sqlite3
-import json
-import hashlib
 import random
+import aiohttp
 from datetime import datetime
 from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# ========== НАСТРОЙКИ ==========
+# ========== НАСТРОЙКИ ДЛЯ RENDER ==========
 TOKEN = os.environ.get("TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 
-# База данных в /tmp (Render разрешает запись)
+# Render разрешает запись только в /tmp
 DB_PATH = os.path.join("/tmp", "otob_bot.db")
 
 logging.basicConfig(level=logging.INFO)
@@ -273,7 +271,7 @@ async def hlr_lookup(phone: str) -> list:
         pass
     return results
 
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК (30+ ИСТОЧНИКОВ) ====================
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
@@ -676,7 +674,7 @@ def generate_html_report(query: str, data: dict) -> str:
 # ==================== ОБРАБОТЧИКИ ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Глобальный поиск", callback_data="global_search")],
         [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")],
         [InlineKeyboardButton("🧑‍💻 Разработчики", url="https://t.me/lkblyad")]
@@ -696,14 +694,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Глобальный поиск", callback_data="global_search")],
         [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")],
         [InlineKeyboardButton("🧑‍💻 Разработчики", url="https://t.me/lkblyad")]
     ])
     await query.message.edit_text(
-        "🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
-        "Отправь любой запрос для поиска",
+        "🔍 *OTOB — Osint Tool Olimpov Bot*\n\nОтправь любой запрос для поиска",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -757,12 +754,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     wait_msg = await update.message.reply_text("⏳ OTOB выполняет поиск по 30+ сайтам...")
     data = await global_lookup(text)
-    reply = format_global_result(data)
+    
+    # Генерируем HTML-отчёт
+    html_content = generate_html_report(text, data)
+    
+    filename = f"otob_report_{update.effective_user.id}_{int(datetime.now().timestamp())}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    
+    with open(filename, "rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename=filename,
+            caption=f"📄 *OTOB — Osint Tool Olimpov Bot*\n\n"
+                    f"🔍 Запрос: `{text}`\n"
+                    f"📊 Найдено: {len(data.get('sources', {}))} источников\n\n"
+                    f"💡 Скачайте и откройте в браузере.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")]
+            ])
+        )
+    
+    os.remove(filename)
+    
     remaining = use_search(update.effective_user.id)
-    reply += f"\n\n🔍 Осталось: {remaining}/3"
-    await wait_msg.edit_text(reply, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")]
-    ]))
+    await wait_msg.delete()
+    await update.message.reply_text(f"🔍 OTOB завершил поиск. Осталось: {remaining}/3")
 
 # ==================== АДМИН-КОМАНДЫ ====================
 
@@ -824,8 +842,9 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ЗАПУСК ====================
 
-async def main():
+def main():
     init_db()
+    logger.info("🚀 OTOB бот запускается...")
     
     application = Application.builder().token(TOKEN).build()
 
@@ -840,20 +859,8 @@ async def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(
-        allowed_updates=[],
-        read_timeout=60,
-        write_timeout=60,
-        connect_timeout=60,
-        pool_timeout=60
-    )
-    
-    logger.info("🚀 OTOB бот запущен на Render!")
-    
-    while True:
-        await asyncio.sleep(60)
+    logger.info("✅ Бот готов к работе!")
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

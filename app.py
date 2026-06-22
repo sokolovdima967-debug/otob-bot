@@ -55,15 +55,8 @@ def setup_tools():
         logger.info("📦 Устанавливаю osint-mcp...")
         install_osint_mcp()
     
-    tools = [
-        ("sherlock", "sherlock-project/sherlock"),
-        ("maigret", "soxoj/maigret"),
-        ("theHarvester", "laramies/theHarvester"),
-        ("dnstwist", "elceef/dnstwist"),
-        ("holehe", "megadose/holehe"),
-    ]
-    
-    for tool, repo in tools:
+    tools = ["sherlock", "maigret", "theHarvester", "dnstwist", "holehe"]
+    for tool in tools:
         try:
             subprocess.check_call([tool, "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             logger.info(f"✅ {tool} уже установлен")
@@ -176,7 +169,6 @@ def detect_query_type(query: str) -> str:
 
 # ==================== ФУНКЦИИ ПОИСКА ====================
 
-# ----- 1. HTMLWeb.ru -----
 async def htmlweb_lookup(phone: str) -> dict:
     try:
         clean = re.sub(r'\D', '', phone)
@@ -197,7 +189,6 @@ async def htmlweb_lookup(phone: str) -> dict:
         logger.error(f"HTMLWeb error: {e}")
     return None
 
-# ----- 2. Veriphone -----
 async def veriphone_lookup(phone: str) -> dict:
     try:
         clean = re.sub(r'\D', '', phone)
@@ -217,7 +208,6 @@ async def veriphone_lookup(phone: str) -> dict:
         logger.error(f"Veriphone error: {e}")
     return None
 
-# ----- 3. Numverify -----
 async def numverify_lookup(phone: str) -> dict:
     try:
         clean = re.sub(r'\D', '', phone)
@@ -238,7 +228,6 @@ async def numverify_lookup(phone: str) -> dict:
         logger.error(f"Numverify error: {e}")
     return None
 
-# ----- 4. HLR (smsc.ru) -----
 async def hlr_lookup(phone: str) -> dict:
     try:
         clean = re.sub(r'\D', '', phone)
@@ -255,7 +244,6 @@ async def hlr_lookup(phone: str) -> dict:
         logger.error(f"HLR error: {e}")
     return None
 
-# ----- 5. HaveIBeenPwned -----
 async def hibp_lookup(email: str) -> list:
     try:
         url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
@@ -268,7 +256,6 @@ async def hibp_lookup(email: str) -> list:
         pass
     return []
 
-# ----- 6. EmailRep -----
 async def emailrep_lookup(email: str) -> dict:
     try:
         url = f"https://emailrep.io/{email}"
@@ -285,7 +272,6 @@ async def emailrep_lookup(email: str) -> dict:
         pass
     return None
 
-# ----- 7. DuckDuckGo -----
 async def duckduckgo_search(query: str) -> list:
     url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -310,18 +296,30 @@ async def duckduckgo_search(query: str) -> list:
         logger.error(f"DuckDuckGo error: {e}")
     return results
 
-# ----- 8. osint-mcp -----
-async def osint_mcp_search(query: str, tool: str) -> str:
+async def holehe_lookup(email: str) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osint-mcp", tool, query,
+            "holehe", email, "--only-used",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         return stdout.decode() if stdout else None
     except Exception as e:
-        logger.error(f"osint-mcp {tool} error: {e}")
+        logger.error(f"Holehe error: {e}")
+    return None
+
+async def sherlock_lookup(username: str) -> str:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sherlock", username,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        return stdout.decode() if stdout else None
+    except Exception as e:
+        logger.error(f"Sherlock error: {e}")
     return None
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
@@ -373,10 +371,15 @@ async def global_lookup(query: str) -> dict:
         if emailrep:
             result["sources"]["emailrep"] = emailrep
             total += 1
+        
+        holehe = await holehe_lookup(query)
+        if holehe:
+            result["sources"]["holehe"] = holehe
+            total += 1
     
     # ===== ДЛЯ USERNAME =====
     if qtype == "username":
-        sherlock = await osint_mcp_search(query, "search_username")
+        sherlock = await sherlock_lookup(query)
         if sherlock:
             result["sources"]["sherlock"] = sherlock
             total += 1
@@ -540,8 +543,11 @@ def functions_menu_keyboard():
         types.InlineKeyboardButton("🌐 Глобальный поиск", callback_data="global_search")
     )
     markup.add(
-        types.InlineKeyboardButton("📧 Email", callback_data="menu_email"),
-        types.InlineKeyboardButton("📱 Телефон", callback_data="menu_phone")
+        types.InlineKeyboardButton("📧 Email", callback_data="email_search"),
+        types.InlineKeyboardButton("📱 Телефон", callback_data="phone_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👤 Username", callback_data="username_search")
     )
     markup.add(
         types.InlineKeyboardButton("❓ Помощь", callback_data="menu_help"),
@@ -645,10 +651,11 @@ def callback_handler(call):
         bot.edit_message_text(
             "🔍 *Выбери функцию:*\n\n"
             "📌 *Основной поиск:*\n"
-            "• 🌐 Глобальный поиск — номер, email, ФИО\n\n"
-            "📌 *Поиск по данным:*\n"
+            "• 🌐 Глобальный поиск — номер, email, ФИО, IP, username\n\n"
+            "📌 *Быстрый поиск:*\n"
             "• 📧 Email — проверка утечек\n"
-            "• 📱 Телефон — оператор, регион\n\n"
+            "• 📱 Телефон — оператор, регион\n"
+            "• 👤 Username — поиск в соцсетях\n\n"
             "📌 *Дополнительно:*\n"
             "• ❓ Помощь\n"
             "• 📊 Баланс",
@@ -689,7 +696,7 @@ def callback_handler(call):
         bot.edit_message_text(
             "❓ *Помощь*\n\n"
             "📌 *Как пользоваться:*\n"
-            "• Отправь номер, email, никнейм или ФИО\n"
+            "• Отправь номер, email, никнейм или IP\n"
             "• Глобальный поиск — всё в одном запросе\n\n"
             "📊 *Лимит:* 3 поиска в день (сброс в 00:00 МСК)\n"
             "👑 *Админ:* безлимитный доступ\n\n"
@@ -727,6 +734,7 @@ def callback_handler(call):
         )
         return
     
+    # ===== ГЛОБАЛЬНЫЙ ПОИСК =====
     if call.data == "global_search":
         bot.edit_message_text(
             "🌐 *Глобальный поиск*\n\n"
@@ -747,13 +755,42 @@ def callback_handler(call):
         )
         return
     
-    if call.data in ["menu_email", "menu_phone"]:
-        descriptions = {
-            "menu_email": "📧 *Проверка email*\n\nОтправь email для проверки утечек.",
-            "menu_phone": "📱 *Проверка телефона*\n\nОтправь номер (79261234567).",
-        }
+    # ===== ПОИСК ПО EMAIL =====
+    if call.data == "email_search":
         bot.edit_message_text(
-            descriptions.get(call.data, "Функция активна."),
+            "📧 *Проверка email*\n\n"
+            "Отправь email для проверки утечек.\n\n"
+            "Пример: user@example.com",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
+            )
+        )
+        return
+    
+    # ===== ПОИСК ПО ТЕЛЕФОНУ =====
+    if call.data == "phone_search":
+        bot.edit_message_text(
+            "📱 *Проверка телефона*\n\n"
+            "Отправь номер для проверки.\n\n"
+            "Пример: +79991234567 или 79991234567",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
+            )
+        )
+        return
+    
+    # ===== ПОИСК ПО USERNAME =====
+    if call.data == "username_search":
+        bot.edit_message_text(
+            "👤 *Поиск по username*\n\n"
+            "Отправь никнейм для поиска в соцсетях.\n\n"
+            "Пример: username",
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",
@@ -798,7 +835,7 @@ def html_callback(call):
     
     os.remove(filename)
 
-# ==================== ОБРАБОТЧИК ТЕКСТА ====================
+# ==================== ОБРАБОТЧИК ТЕКСТА (ГЛАВНАЯ ФУНКЦИЯ) ====================
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):

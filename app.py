@@ -8,6 +8,7 @@ import aiohttp
 import asyncio
 import json
 import subprocess
+import sys
 from datetime import datetime
 from bs4 import BeautifulSoup
 import telebot
@@ -21,16 +22,67 @@ DB_PATH = os.path.join("/tmp", "otob_bot.db")
 # ===== КЛЮЧИ API =====
 NUMVERIFY_KEY = "9b8695be8a2fff21a10445d9d4e99469"
 VERIPHONE_KEY = "ok_382cdf7065b120448d12a80c7e975756"
-ABSTRACT_API_KEY = "b2b0a9d6f8124c2f9b7a8d4f3e6c1a5b"
-PHONE_VALIDATION_KEY = "07b3d5c4e8f2a1d6"
-DEHASHED_KEY = "your_dehashed_key"  # Замени на свой (бесплатно)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ==================== АВТОУСТАНОВКА ИНСТРУМЕНТОВ ====================
+
+def install_package(package: str):
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
+        logger.info(f"✅ Установлен: {package}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки {package}: {e}")
+        return False
+
+def install_osint_mcp():
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "osint-mcp", "--quiet"])
+        logger.info("✅ Установлен: osint-mcp")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки osint-mcp: {e}")
+        return False
+
+def setup_tools():
+    logger.info("🔧 Проверка и установка инструментов...")
+    try:
+        import osint_mcp
+        logger.info("✅ osint-mcp уже установлен")
+    except ImportError:
+        logger.info("📦 Устанавливаю osint-mcp...")
+        install_osint_mcp()
+    
+    tools = [
+        ("sherlock", "sherlock-project/sherlock"),
+        ("maigret", "soxoj/maigret"),
+        ("theHarvester", "laramies/theHarvester"),
+        ("dnstwist", "elceef/dnstwist"),
+        ("holehe", "megadose/holehe"),
+    ]
+    
+    for tool, repo in tools:
+        try:
+            subprocess.check_call([tool, "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info(f"✅ {tool} уже установлен")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.info(f"📦 Устанавливаю {tool}...")
+            try:
+                subprocess.check_call(["pip", "install", tool, "--quiet"])
+            except:
+                pass
+    
+    logger.info("✅ Все инструменты проверены!")
+    return True
+
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 bot.remove_webhook()
+
+# Хранилище результатов для HTML-отчётов
+user_results = {}
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -122,28 +174,27 @@ def detect_query_type(query: str) -> str:
         return "ip"
     return "text"
 
-# ==================== ВСЕ OSINT-ИСТОЧНИКИ ====================
+# ==================== ФУНКЦИИ ПОИСКА ====================
 
-# ----- 1. Numverify -----
-async def numverify_lookup(phone: str) -> dict:
+# ----- 1. HTMLWeb.ru -----
+async def htmlweb_lookup(phone: str) -> dict:
     try:
         clean = re.sub(r'\D', '', phone)
-        url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
+        url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data.get('valid'):
+                    if data:
                         return {
-                            "valid": True,
-                            "country": data.get('country_name'),
-                            "location": data.get('location'),
-                            "carrier": data.get('carrier'),
-                            "line_type": data.get('line_type'),
-                            "source": "numverify.com"
+                            "country": data.get('country', '—'),
+                            "operator": data.get('operator', '—'),
+                            "region": data.get('region', '—'),
+                            "timezone": data.get('timezone', '—'),
+                            "source": "htmlweb.ru"
                         }
     except Exception as e:
-        logger.error(f"Numverify error: {e}")
+        logger.error(f"HTMLWeb error: {e}")
     return None
 
 # ----- 2. Veriphone -----
@@ -157,200 +208,54 @@ async def veriphone_lookup(phone: str) -> dict:
                     data = await resp.json()
                     if data.get('phone_valid'):
                         return {
-                            "valid": True,
-                            "country": data.get('country'),
-                            "carrier": data.get('carrier'),
-                            "type": data.get('phone_type'),
+                            "country": data.get('country', '—'),
+                            "carrier": data.get('carrier', '—'),
+                            "type": data.get('phone_type', '—'),
                             "source": "veriphone.io"
                         }
     except Exception as e:
         logger.error(f"Veriphone error: {e}")
     return None
 
-# ----- 3. HTMLWeb.ru -----
-async def htmlweb_lookup(phone: str) -> dict:
+# ----- 3. Numverify -----
+async def numverify_lookup(phone: str) -> dict:
     try:
         clean = re.sub(r'\D', '', phone)
-        url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data:
-                        return {
-                            "valid": True,
-                            "country": data.get('country'),
-                            "operator": data.get('operator'),
-                            "region": data.get('region'),
-                            "timezone": data.get('timezone'),
-                            "source": "htmlweb.ru"
-                        }
-    except Exception as e:
-        logger.error(f"HTMLWeb error: {e}")
-    return None
-
-# ----- 4. AbstractAPI -----
-async def abstractapi_lookup(phone: str) -> dict:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
+        url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get('valid'):
                         return {
-                            "valid": True,
-                            "country": data.get('country', {}).get('name'),
-                            "carrier": data.get('carrier'),
-                            "location": data.get('location'),
-                            "source": "abstractapi.com"
+                            "country": data.get('country_name', '—'),
+                            "location": data.get('location', '—'),
+                            "carrier": data.get('carrier', '—'),
+                            "line_type": data.get('line_type', '—'),
+                            "source": "numverify.com"
                         }
     except Exception as e:
-        logger.error(f"AbstractAPI error: {e}")
+        logger.error(f"Numverify error: {e}")
     return None
 
-# ----- 5. PhoneValidation -----
-async def phonevalidation_lookup(phone: str) -> dict:
+# ----- 4. HLR (smsc.ru) -----
+async def hlr_lookup(phone: str) -> dict:
     try:
         clean = re.sub(r'\D', '', phone)
-        url = f"https://api.phonevalidation.io/v1/validate?number={clean}&key={PHONE_VALIDATION_KEY}"
+        url = f"https://smsc.ru/testhlr.php?phone={clean}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('valid'):
-                        return {
-                            "valid": True,
-                            "country": data.get('country'),
-                            "carrier": data.get('carrier'),
-                            "type": data.get('type'),
-                            "source": "phonevalidation.io"
-                        }
+                    data = await resp.text()
+                    if 'OK' in data:
+                        return {"status": "✅ Активен", "source": "smsc.ru"}
+                    else:
+                        return {"status": "❌ Не активен", "source": "smsc.ru"}
     except Exception as e:
-        logger.error(f"PhoneValidation error: {e}")
+        logger.error(f"HLR error: {e}")
     return None
 
-# ----- 6. Hudson Rock (Новый - БЕЗ КЛЮЧА) -----
-async def hudsonrock_lookup(query: str) -> dict:
-    """Поиск в Hudson Rock (infostealer данные)"""
-    try:
-        if '@' in query:
-            endpoint = f"https://cavalier.hudsonrock.com/api/v1/search-by-email?email={query}"
-            params = None
-        elif re.search(r'^\+?\d{10,15}$', re.sub(r'[\s\-()]', '', query)):
-            phone = re.sub(r'\D', '', query)
-            endpoint = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={phone}"
-            params = None
-        else:
-            endpoint = f"https://cavalier.hudsonrock.com/api/v1/search-by-domain?domain={query}"
-            params = None
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(endpoint, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('total_results', 0) > 0:
-                        return {
-                            "source": "HudsonRock",
-                            "found": True,
-                            "total": data.get('total_results', 0),
-                            "breaches": data.get('results', [])[:5]
-                        }
-    except Exception as e:
-        logger.error(f"HudsonRock error: {e}")
-    return None
-
-# ----- 7. ProxyNova (Новый) -----
-async def proxynova_lookup(query: str) -> dict:
-    """Поиск в ProxyNova"""
-    try:
-        # Используем публичный API ProxyNova
-        url = f"https://api.proxynova.com/v1/search?q={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('results'):
-                        return {
-                            "source": "ProxyNova",
-                            "found": True,
-                            "total": len(data.get('results', [])),
-                            "results": data.get('results', [])[:5]
-                        }
-    except Exception as e:
-        logger.error(f"ProxyNova error: {e}")
-    return None
-
-# ----- 8. Leaker (CLI-инструмент) -----
-async def leaker_lookup(query: str) -> str:
-    """Поиск через Leaker (CLI)"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "leaker", query,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        return stdout.decode() if stdout else None
-    except Exception as e:
-        logger.error(f"Leaker error: {e}")
-    return None
-
-# ----- 9. Ola Osint (Python-инструмент) -----
-async def olaosint_lookup(query: str) -> dict:
-    """Поиск через Ola Osint (использует Holehe, HIBP, HudsonRock, Google)"""
-    try:
-        from ola_osint import OlaOsint
-        
-        ola = OlaOsint()
-        results = {}
-        
-        if '@' in query:
-            results = await ola.search_email(query)
-        elif re.search(r'^\+?\d{10,15}$', re.sub(r'[\s\-()]', '', query)):
-            results = await ola.search_phone(query)
-        else:
-            results = await ola.search_username(query)
-        
-        if results:
-            return {
-                "source": "OlaOsint",
-                "found": True,
-                "results": results
-            }
-    except Exception as e:
-        logger.error(f"OlaOsint error: {e}")
-    return None
-
-# ----- 10. DeHashed -----
-async def dehashed_lookup(query: str) -> dict:
-    """Поиск в DeHashed"""
-    try:
-        url = f"https://dehashed.com/search?query={query}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    entries = soup.select('.entry, .result-item')
-                    if entries:
-                        results = []
-                        for entry in entries[:5]:
-                            text = entry.get_text(strip=True)
-                            results.append(text[:200])
-                        return {
-                            "source": "DeHashed",
-                            "found": True,
-                            "total": len(entries),
-                            "results": results
-                        }
-    except Exception as e:
-        logger.error(f"DeHashed error: {e}")
-    return None
-
-# ----- 11. HaveIBeenPwned -----
+# ----- 5. HaveIBeenPwned -----
 async def hibp_lookup(email: str) -> list:
     try:
         url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
@@ -363,7 +268,7 @@ async def hibp_lookup(email: str) -> list:
         pass
     return []
 
-# ----- 12. EmailRep -----
+# ----- 6. EmailRep -----
 async def emailrep_lookup(email: str) -> dict:
     try:
         url = f"https://emailrep.io/{email}"
@@ -372,37 +277,51 @@ async def emailrep_lookup(email: str) -> dict:
                 if resp.status == 200:
                     data = await resp.json()
                     return {
-                        "reputation": data.get('reputation'),
-                        "suspicious": data.get('suspicious'),
+                        "reputation": data.get('reputation', '—'),
+                        "suspicious": data.get('suspicious', False),
                         "references": data.get('references', 0)
                     }
     except:
         pass
     return None
 
-# ----- 13. HLR (smsc.ru) -----
-async def hlr_lookup(phone: str) -> dict:
+# ----- 7. DuckDuckGo -----
+async def duckduckgo_search(query: str) -> list:
+    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    results = []
     try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://smsc.ru/testhlr.php?phone={clean}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
+            async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status == 200:
-                    data = await resp.text()
-                    if 'OK' in data:
-                        return {
-                            "valid": True,
-                            "status": "Активен",
-                            "source": "smsc.ru"
-                        }
-                    else:
-                        return {
-                            "valid": False,
-                            "status": "Не активен или ошибка",
-                            "source": "smsc.ru"
-                        }
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    for item in soup.select('.result')[:5]:
+                        title_elem = item.select_one('.result__title a')
+                        snippet_elem = item.select_one('.result__snippet')
+                        if title_elem:
+                            title = title_elem.get_text(strip=True)
+                            link = title_elem.get('href')
+                            if link and link.startswith('/'):
+                                link = 'https://duckduckgo.com' + link
+                            snippet = snippet_elem.get_text(strip=True) if snippet_elem else "Нет описания"
+                            results.append({'title': title, 'snippet': snippet, 'link': link})
     except Exception as e:
-        logger.error(f"HLR error: {e}")
+        logger.error(f"DuckDuckGo error: {e}")
+    return results
+
+# ----- 8. osint-mcp -----
+async def osint_mcp_search(query: str, tool: str) -> str:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "osint-mcp", tool, query,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        return stdout.decode() if stdout else None
+    except Exception as e:
+        logger.error(f"osint-mcp {tool} error: {e}")
     return None
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
@@ -415,181 +334,192 @@ async def global_lookup(query: str) -> dict:
         "query": query,
         "type": qtype,
         "timestamp": datetime.now().isoformat(),
-        "sources": {}
+        "sources": {},
+        "total_results": 0
     }
+    
+    total = 0
     
     # ===== ДЛЯ НОМЕРА =====
     if qtype == "phone":
-        # API
-        numverify = await numverify_lookup(query)
-        if numverify:
-            result["sources"]["numverify"] = numverify
+        htmlweb = await htmlweb_lookup(query)
+        if htmlweb:
+            result["sources"]["htmlweb"] = htmlweb
+            total += 1
         
         veriphone = await veriphone_lookup(query)
         if veriphone:
             result["sources"]["veriphone"] = veriphone
+            total += 1
         
-        htmlweb = await htmlweb_lookup(query)
-        if htmlweb:
-            result["sources"]["htmlweb"] = htmlweb
-        
-        abstractapi = await abstractapi_lookup(query)
-        if abstractapi:
-            result["sources"]["abstractapi"] = abstractapi
-        
-        phonevalidation = await phonevalidation_lookup(query)
-        if phonevalidation:
-            result["sources"]["phonevalidation"] = phonevalidation
+        numverify = await numverify_lookup(query)
+        if numverify:
+            result["sources"]["numverify"] = numverify
+            total += 1
         
         hlr = await hlr_lookup(query)
         if hlr:
             result["sources"]["hlr"] = hlr
-        
-        # OSINT-источники (новые)
-        hudsonrock = await hudsonrock_lookup(query)
-        if hudsonrock:
-            result["sources"]["hudsonrock"] = hudsonrock
-        
-        proxynova = await proxynova_lookup(query)
-        if proxynova:
-            result["sources"]["proxynova"] = proxynova
-        
-        # CLI-инструменты (если установлены)
-        leaker = await leaker_lookup(query)
-        if leaker:
-            result["sources"]["leaker"] = leaker
-        
-        olaosint = await olaosint_lookup(query)
-        if olaosint:
-            result["sources"]["olaosint"] = olaosint
-        
-        dehashed = await dehashed_lookup(query)
-        if dehashed:
-            result["sources"]["dehashed"] = dehashed
+            total += 1
     
     # ===== ДЛЯ EMAIL =====
     if qtype == "email":
         hibp = await hibp_lookup(query)
         if hibp:
             result["sources"]["hibp"] = hibp
+            total += len(hibp)
         
         emailrep = await emailrep_lookup(query)
         if emailrep:
             result["sources"]["emailrep"] = emailrep
-        
-        hudsonrock = await hudsonrock_lookup(query)
-        if hudsonrock:
-            result["sources"]["hudsonrock"] = hudsonrock
-        
-        proxynova = await proxynova_lookup(query)
-        if proxynova:
-            result["sources"]["proxynova"] = proxynova
-        
-        dehashed = await dehashed_lookup(query)
-        if dehashed:
-            result["sources"]["dehashed"] = dehashed
-        
-        olaosint = await olaosint_lookup(query)
-        if olaosint:
-            result["sources"]["olaosint"] = olaosint
+            total += 1
     
     # ===== ДЛЯ USERNAME =====
     if qtype == "username":
-        hudsonrock = await hudsonrock_lookup(query)
-        if hudsonrock:
-            result["sources"]["hudsonrock"] = hudsonrock
-        
-        proxynova = await proxynova_lookup(query)
-        if proxynova:
-            result["sources"]["proxynova"] = proxynova
-        
-        dehashed = await dehashed_lookup(query)
-        if dehashed:
-            result["sources"]["dehashed"] = dehashed
-        
-        olaosint = await olaosint_lookup(query)
-        if olaosint:
-            result["sources"]["olaosint"] = olaosint
+        sherlock = await osint_mcp_search(query, "search_username")
+        if sherlock:
+            result["sources"]["sherlock"] = sherlock
+            total += 1
     
+    # ===== ДЛЯ IP =====
+    if qtype == "ip":
+        try:
+            url = f"http://ip-api.com/json/{query}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('status') == 'success':
+                            result["sources"]["geoip"] = {
+                                "country": data.get('country', '—'),
+                                "city": data.get('city', '—'),
+                                "region": data.get('region', '—'),
+                                "isp": data.get('isp', '—'),
+                                "asn": data.get('as', '—')
+                            }
+                            total += 1
+        except Exception as e:
+            logger.error(f"GeoIP error: {e}")
+    
+    # ===== ДЛЯ ВСЕХ ТИПОВ =====
+    web_results = await duckduckgo_search(query)
+    if web_results:
+        result["sources"]["web"] = web_results
+        total += len(web_results)
+    
+    result["total_results"] = total
     return result
 
-# ==================== ФОРМАТИРОВАНИЕ РЕЗУЛЬТАТА ====================
+# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
-def format_global_result(data: dict) -> str:
-    query = data['query']
-    qtype = data['type']
+def generate_html_report(query: str, data: dict) -> str:
     sources = data.get("sources", {})
+    qtype = data.get("type", "text")
+    total = data.get("total_results", 0)
     
-    reply = f"🔎 *OTOB — Osint Tool Olimpov Bot*\n\n"
-    reply += f"📋 Тип: {qtype}\n"
-    reply += f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
+    all_results = []
+    for source_name, items in sources.items():
+        if items:
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        all_results.append(item)
+                    else:
+                        all_results.append({"title": str(item), "source": source_name})
+            elif isinstance(items, dict):
+                all_results.append(items)
+            else:
+                all_results.append({"title": str(items), "source": source_name})
     
-    if not sources:
-        reply += "❌ Ничего не найдено.\n\n"
-        reply += "💡 Попробуйте другой запрос."
-        return reply
+    html = f"""
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTOB — Osint Tool Olimpov Bot</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ background: #0d0d0d; color: #b0b0b0; font-family: 'Segoe UI', sans-serif; padding: 30px 20px; line-height: 1.6; }}
+        .container {{ max-width: 1000px; margin: 0 auto; background: #161616; border-radius: 10px; padding: 30px 35px; border: 1px solid #2a2a2a; }}
+        .header {{ border-bottom: 1px solid #2a2a2a; padding-bottom: 18px; margin-bottom: 22px; display: flex; justify-content: space-between; flex-wrap: wrap; }}
+        .header h1 {{ font-size: 24px; font-weight: 600; color: #c8c8c8; }}
+        .header h1 span {{ color: #6a6a6a; }}
+        .header .sub {{ color: #6a6a6a; font-size: 13px; }}
+        .badge {{ display: inline-block; background: #222222; padding: 3px 12px; border-radius: 4px; font-size: 12px; color: #8a8a8a; border: 1px solid #333333; }}
+        .badge-success {{ background: #1a2a1a; color: #7aaa7a; border-color: #2a3a2a; }}
+        .result-item {{ margin: 12px 0; padding: 14px 18px; background: #121212; border-radius: 6px; border-left: 3px solid #2a2a2a; }}
+        .result-item .title {{ font-size: 16px; font-weight: 500; color: #c0c0c0; }}
+        .result-item .text {{ font-size: 14px; color: #8a8a8a; margin-top: 6px; }}
+        .result-item .extra {{ font-size: 13px; color: #6a6a6a; margin-top: 4px; }}
+        .result-item .index {{ display: inline-block; background: #1a1a1a; color: #5a5a5a; font-size: 12px; padding: 1px 10px; border-radius: 4px; margin-right: 10px; }}
+        .source-tag {{ display: inline-block; background: #1a1a1a; color: #5a5a5a; font-size: 10px; padding: 1px 8px; border-radius: 3px; margin-left: 10px; border: 1px solid #262626; }}
+        .empty {{ color: #555555; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
+        .stats {{ margin-top: 20px; padding: 12px 18px; background: #121212; border-radius: 6px; border: 1px solid #1a1a1a; color: #6a6a6a; font-size: 13px; text-align: center; }}
+        .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #1e1e1e; font-size: 12px; color: #4a4a4a; text-align: center; }}
+        .footer a {{ color: #6a6a6a; text-decoration: none; }}
+        .watermark {{ position: fixed; bottom: 30px; left: 30px; z-index: 1000; opacity: 0.15; user-select: none; pointer-events: none; display: flex; flex-direction: column; align-items: center; }}
+        .watermark svg {{ width: 80px; height: 80px; }}
+        .watermark .text {{ color: #3a3a3a; font-size: 14px; font-weight: 700; letter-spacing: 3px; margin-top: 4px; text-transform: uppercase; }}
+        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header h1 {{ font-size: 20px; }} .watermark svg {{ width: 50px; height: 50px; }} .watermark .text {{ font-size: 10px; }} }}
+    </style>
+</head>
+<body>
+    <div class="watermark">
+        <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="42" cy="42" r="28" stroke="#4a4a4a" stroke-width="4" fill="none"/>
+            <line x1="62" y1="62" x2="88" y2="88" stroke="#4a4a4a" stroke-width="6" stroke-linecap="round"/>
+            <ellipse cx="42" cy="42" rx="18" ry="14" stroke="#4a4a4a" stroke-width="2" fill="none"/>
+            <circle cx="42" cy="42" r="6" stroke="#4a4a4a" stroke-width="2" fill="none"/>
+            <circle cx="42" cy="42" r="2" fill="#4a4a4a"/>
+            <circle cx="38" cy="38" r="3" fill="#4a4a4a" opacity="0.3"/>
+        </svg>
+        <div class="text">OTOB</div>
+    </div>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>OTOB <span>Osint Tool Olimpov Bot</span></h1>
+                <div class="sub">Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
+            </div>
+            <div><span class="badge badge-success">найдено: {total}</span></div>
+        </div>
+"""
     
-    # ===== ВЫВОД ПО НОМЕРУ =====
-    if qtype == "phone":
-        for source_name, data in sources.items():
-            reply += f"🔹 **{source_name}**\n"
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    if key != "source" and value:
-                        if isinstance(value, list):
-                            reply += f"   {key}: {len(value)} результатов\n"
-                            for item in value[:3]:
-                                if isinstance(item, dict):
-                                    reply += f"      • {item}\n"
-                                else:
-                                    reply += f"      • {item}\n"
-                        else:
-                            reply += f"   {key}: {value}\n"
-            elif isinstance(data, list):
-                reply += f"   {len(data)} результатов\n"
-                for item in data[:5]:
-                    reply += f"   • {item}\n"
-            reply += "\n"
+    if all_results:
+        for idx, item in enumerate(all_results[:25], 1):
+            title = item.get('title', '—')[:60]
+            text = item.get('text', '')[:200]
+            extra = item.get('extra', '')
+            source = item.get('source', '')
+            
+            html += f"""
+        <div class="result-item">
+            <div class="title">
+                <span class="index">#{idx}</span>
+                {title}
+                <span class="source-tag">{source}</span>
+            </div>
+"""
+            if text and text != '—' and text != '':
+                html += f"            <div class=\"text\">{text}</div>\n"
+            if extra:
+                html += f"            <div class=\"extra\">📎 {extra}</div>\n"
+            html += "        </div>\n"
+        
+        html += f"""
+        <div class="stats">📊 Найдено <strong>{total}</strong> результатов</div>
+"""
+    else:
+        html += '<div class="empty">❌ Ничего не найдено</div>'
     
-    # ===== ВЫВОД ПО EMAIL =====
-    if qtype == "email":
-        for source_name, data in sources.items():
-            reply += f"🔹 **{source_name}**\n"
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    if key != "source" and value:
-                        if isinstance(value, list):
-                            reply += f"   {key}: {len(value)} результатов\n"
-                            for item in value[:5]:
-                                reply += f"      • {item}\n"
-                        else:
-                            reply += f"   {key}: {value}\n"
-            elif isinstance(data, list):
-                reply += f"   {len(data)} результатов\n"
-                for item in data[:5]:
-                    reply += f"   • {item}\n"
-            reply += "\n"
-    
-    # ===== ВЫВОД ПО USERNAME =====
-    if qtype == "username":
-        for source_name, data in sources.items():
-            reply += f"🔹 **{source_name}**\n"
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    if key != "source" and value:
-                        if isinstance(value, list):
-                            reply += f"   {key}: {len(value)} результатов\n"
-                            for item in value[:5]:
-                                reply += f"      • {item}\n"
-                        else:
-                            reply += f"   {key}: {value}\n"
-            elif isinstance(data, list):
-                reply += f"   {len(data)} результатов\n"
-                for item in data[:5]:
-                    reply += f"   • {item}\n"
-            reply += "\n"
-    
-    return reply
+    html += f"""
+        <div class="footer">🛡️ OTOB — Osint Tool Olimpov Bot · <a href="https://t.me/Osint_Tool_Olimpov_bot" target="_blank">@Osint_Tool_Olimpov_bot</a></div>
+    </div>
+</body>
+</html>
+"""
+    return html
 
 # ==================== МЕНЮ И КНОПКИ ====================
 
@@ -631,8 +561,7 @@ def start_command(message):
     
     bot.send_message(
         message.chat.id,
-        f"🔍 *OTOB — Osint Tool Olimpov Bot*\n"
-        f"👨‍⚖️ *С поддержкой Мирослава Олипова*\n\n"
+        f"🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
         f"📊 У тебя {remaining} поисков.\n\n"
         f"📌 *Выбери действие:*",
         parse_mode="Markdown",
@@ -704,7 +633,7 @@ def callback_handler(call):
     
     if call.data == "menu_back":
         bot.edit_message_text(
-            f"🔍 *OTOB — Osint Tool Olimpov Bot*\n👨‍⚖️ *С поддержкой Мирослава Олипова*\n\n📌 *Выбери действие:*",
+            f"🔍 *OTOB — Osint Tool Olimpov Bot*\n\n📌 *Выбери действие:*",
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",
@@ -808,7 +737,7 @@ def callback_handler(call):
             "• Никнейм: username\n"
             "• IP-адрес: 8.8.8.8\n"
             "• Любой текст\n\n"
-            "ℹ️ Бот использует 13+ OSINT-источников.",
+            "ℹ️ Бот использует 10+ OSINT-источников.",
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",
@@ -834,6 +763,41 @@ def callback_handler(call):
         )
         return
 
+# ==================== КНОПКА ДЛЯ HTML-ОТЧЁТА ====================
+
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("html_"))
+def html_callback(call):
+    bot.answer_callback_query(call.id)
+    
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    
+    if chat_id not in user_results:
+        bot.send_message(chat_id, "❌ Данные не найдены. Повторите поиск.")
+        return
+    
+    query = user_results[chat_id]["query"]
+    data = user_results[chat_id]["data"]
+    
+    html_content = generate_html_report(query, data)
+    filename = f"otob_report_{user_id}_{int(datetime.now().timestamp())}.html"
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    
+    with open(filename, "rb") as f:
+        bot.send_document(
+            chat_id,
+            f,
+            caption=f"📄 *OTOB — Osint Tool Olimpov Bot*\n\n"
+                    f"🔍 Запрос: `{query}`\n"
+                    f"📊 Найдено: {data.get('total_results', 0)} результатов\n\n"
+                    f"💡 Скачайте и откройте в браузере.",
+            parse_mode="Markdown"
+        )
+    
+    os.remove(filename)
+
 # ==================== ОБРАБОТЧИК ТЕКСТА ====================
 
 @bot.message_handler(func=lambda message: True)
@@ -843,6 +807,7 @@ def handle_text(message):
         return
     
     user_id = message.from_user.id
+    chat_id = message.chat.id
     
     if not can_search(user_id):
         bot.reply_to(message, "❌ *Лимит поисков исчерпан!*", parse_mode="Markdown")
@@ -856,30 +821,42 @@ def handle_text(message):
         data = loop.run_until_complete(global_lookup(text))
         loop.close()
         
-        reply = format_global_result(data)
+        total = data.get("total_results", 0)
         remaining = use_search(user_id)
-        reply += f"\n\n🔍 1 поиск потрачено. Осталось: {remaining}/3"
+        
+        # Сохраняем результаты для HTML-отчёта
+        user_results[chat_id] = {"query": text, "data": data}
+        
+        # Отправляем краткое сообщение с кнопкой
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("📄 Скачать HTML-отчёт", callback_data=f"html_{chat_id}"),
+            types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
+        )
         
         bot.edit_message_text(
-            reply,
-            message.chat.id,
+            f"✅ *Поиск завершён!*\n\n"
+            f"🔍 Запрос: `{text}`\n"
+            f"📊 Найдено: **{total}** результатов\n"
+            f"🔍 Осталось поисков: **{remaining}/3**\n\n"
+            f"📄 Нажмите кнопку ниже, чтобы скачать полный отчёт в формате HTML.",
+            chat_id,
             msg.message_id,
             parse_mode="Markdown",
-            reply_markup=types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
-            )
+            reply_markup=markup
         )
         
     except Exception as e:
         bot.edit_message_text(
             f"⚠️ Ошибка: {str(e)[:100]}",
-            message.chat.id,
+            chat_id,
             msg.message_id
         )
 
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
+    setup_tools()
     init_db()
     logger.info("🚀 OTOB бот запускается...")
     bot.remove_webhook()

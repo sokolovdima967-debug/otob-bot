@@ -34,13 +34,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== ХРАНИЛИЩЕ ОТЧЁТОВ ====================
-reports = {}  # {report_id: {"query": str, "data": dict, "html": str, "created": timestamp}}
+reports = {}
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 bot.remove_webhook()
 
-# ==================== HTTP-СЕРВЕР ДЛЯ ОТОБРАЖЕНИЯ ОТЧЁТОВ ====================
+# ==================== HTTP-СЕРВЕР ====================
 
 class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -56,6 +56,11 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"Report not found")
+        elif self.path == '/health' or self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"OK")
         else:
             self.send_response(404)
             self.end_headers()
@@ -69,7 +74,6 @@ def run_http_server():
     thread.start()
     logger.info(f"✅ HTTP-сервер запущен на порту {port}")
 
-# Запускаем HTTP-сервер для отчётов
 run_http_server()
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -561,8 +565,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             else:
                 all_results.append({"title": str(items), "source": source_name})
     
-    base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://otob-bot.onrender.com")
-    
     html = f"""
 <!DOCTYPE html>
 <html lang="ru">
@@ -590,7 +592,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             box-shadow: 0 20px 60px rgba(0,0,0,0.9);
             position: relative;
         }}
-        /* ===== ВОДЯНОЙ ЗНАК (глаз в лупе + OTOB) ===== */
         .watermark {{
             position: absolute;
             top: 20px;
@@ -763,7 +764,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 """
     return html
 
-# ==================== МЕНЮ И КНОПКИ ====================
+# ==================== МЕНЮ ====================
 
 def main_menu_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -1035,39 +1036,7 @@ def callback_handler(call):
         )
         return
 
-# ==================== КНОПКА ДЛЯ ОТКРЫТИЯ ОТЧЁТА ====================
-
-@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("open_"))
-def open_report_callback(call):
-    bot.answer_callback_query(call.id)
-    
-    report_id = call.data.replace("open_", "")
-    
-    if report_id not in reports:
-        bot.send_message(call.message.chat.id, "❌ Отчёт не найден. Повторите поиск.")
-        return
-    
-    base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://otob-bot.onrender.com")
-    report_url = f"{base_url}/report/{report_id}"
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("📄 Открыть отчёт в браузере", url=report_url),
-        types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
-    )
-    
-    bot.edit_message_text(
-        f"✅ *Поиск завершён!*\n\n"
-        f"🔍 Запрос: `{call.message.text}`\n"
-        f"📊 Найдено: {reports[report_id]['data'].get('total_results', 0)} результатов\n\n"
-        f"📄 Нажмите кнопку ниже, чтобы открыть полный отчёт в браузере.",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-
-# ==================== ОБРАБОТЧИК ТЕКСТА ====================
+# ==================== ОСНОВНОЙ ОБРАБОТЧИК ====================
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
@@ -1093,10 +1062,8 @@ def handle_text(message):
         total = data.get("total_results", 0)
         remaining = use_search(user_id)
         
-        # Генерируем уникальный ID для отчёта
-        report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-        
         # Генерируем HTML
+        report_id = f"{user_id}_{int(datetime.now().timestamp())}"
         html = generate_html_report(text, data, report_id)
         
         # Сохраняем отчёт
@@ -1107,30 +1074,33 @@ def handle_text(message):
             "created": datetime.now().timestamp()
         }
         
-        # Удаляем старые отчёты (старше 1 часа)
+        # Удаляем старые отчёты
         current_time = datetime.now().timestamp()
         for rid in list(reports.keys()):
             if current_time - reports[rid]["created"] > 3600:
                 del reports[rid]
         
-        # Отправляем сообщение с кнопкой
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("📄 Открыть отчёт", callback_data=f"open_{report_id}"),
-            types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
-        )
+        # Сохраняем HTML во временный файл
+        filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(html)
         
-        bot.edit_message_text(
-            f"✅ *Поиск завершён!*\n\n"
-            f"🔍 Запрос: `{text}`\n"
-            f"📊 Найдено: **{total}** результатов\n"
-            f"🔍 Осталось поисков: **{remaining}/3**\n\n"
-            f"📄 Нажмите кнопку ниже, чтобы открыть полный отчёт.",
-            chat_id,
-            msg.message_id,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
+        # Отправляем файл + текст
+        with open(filename, "rb") as f:
+            bot.send_document(
+                chat_id,
+                f,
+                caption=f"📊 *OSINT-отчёт*\n\n"
+                        f"🔍 Запрос: `{text}`\n"
+                        f"📌 Найдено результатов: **{total}**\n"
+                        f"🔍 Осталось поисков: **{remaining}/3**",
+                parse_mode="Markdown"
+            )
+        
+        os.remove(filename)
+        
+        # Удаляем сообщение "⏳ Выполняется..."
+        bot.delete_message(chat_id, msg.message_id)
         
     except Exception as e:
         bot.edit_message_text(

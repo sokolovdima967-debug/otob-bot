@@ -38,7 +38,7 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== БАЗА ДАННЫХ ====================
+# ==================== БАЗА DАННЫХ ====================
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -224,7 +224,7 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== API ФУНКЦИИ ====================
+# ==================== API ФУНКЦИИ (таймаут 30 секунд) ====================
 
 @safe_request
 async def numverify_lookup(phone: str) -> dict:
@@ -233,7 +233,7 @@ async def numverify_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -252,7 +252,7 @@ async def veriphone_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.veriphone.io/v2/verify?phone=%2B{clean}&key={VERIPHONE_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('phone_valid'):
@@ -270,7 +270,7 @@ async def abstractapi_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -289,7 +289,7 @@ async def bigdatacloud_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.bigdatacloud.net/data/phone-validate?phoneNumber=%2B{clean}&key={BIGDATACLOUD_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -310,7 +310,7 @@ async def omkarcloud_lookup(phone: str) -> dict:
     url = f"https://carrier-lookup-api.omkar.cloud/lookup?phone=%2B{clean}"
     headers = {"API-Key": OMKAR_KEY}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, timeout=10) as resp:
+        async with session.get(url, headers=headers, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('is_valid_number'):
@@ -326,7 +326,7 @@ async def htmlweb_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data:
@@ -343,7 +343,7 @@ async def hlr_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://smsc.ru/testhlr.php?phone={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.text()
                 return {"status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
@@ -354,7 +354,7 @@ async def hudsonrock_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=15) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('total_results', 0) > 0:
@@ -371,7 +371,7 @@ async def hunter_lookup(email: str) -> dict:
         return None
     url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 result = data.get('data', {})
@@ -388,7 +388,7 @@ async def hunter_lookup(email: str) -> dict:
 async def emailrep_lookup(email: str) -> dict:
     url = f"https://emailrep.io/{email}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -402,7 +402,7 @@ async def emailrep_lookup(email: str) -> dict:
 async def hibp_lookup(email: str) -> list:
     url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return [b.get('Name') for b in data]
@@ -412,7 +412,7 @@ async def hibp_lookup(email: str) -> list:
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -427,7 +427,7 @@ async def ipinfo_lookup(ip: str) -> dict:
 async def crtsh_lookup(domain: str) -> list:
     url = f"https://crt.sh/?q={domain}&output=json"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data:
@@ -438,7 +438,7 @@ async def crtsh_lookup(domain: str) -> list:
 async def whois_lookup(domain: str) -> dict:
     url = f"https://api.whois.vu/?q={domain}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
+        async with session.get(url, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -446,6 +446,205 @@ async def whois_lookup(domain: str) -> dict:
                     "creation_date": data.get('creation_date', '—'),
                     "expiration_date": data.get('expiration_date', '—')
                 }
+    return None
+
+@safe_request
+async def ip_api_lookup(ip: str) -> dict:
+    """ip-api.com — бесплатно, без ключа, 45 запросов/мин"""
+    url = f"http://ip-api.com/json/{ip}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('status') == 'success':
+                    return {
+                        "country": data.get('country', '—'),
+                        "city": data.get('city', '—'),
+                        "region": data.get('regionName', '—'),
+                        "isp": data.get('isp', '—'),
+                        "asn": data.get('as', '—')
+                    }
+    return None
+
+@safe_request
+async def github_username_lookup(username: str) -> dict:
+    """GitHub API — 60 запросов/час без ключа"""
+    url = f"https://api.github.com/users/{username}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "name": data.get('name', '—'),
+                    "bio": data.get('bio', '—'),
+                    "company": data.get('company', '—'),
+                    "location": data.get('location', '—'),
+                    "public_repos": data.get('public_repos', 0),
+                    "followers": data.get('followers', 0),
+                    "following": data.get('following', 0)
+                }
+    return None
+
+@safe_request
+async def telegram_username_lookup(username: str) -> dict:
+    """Telegram API — проверка существования username"""
+    try:
+        url = f"https://t.me/{username}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    return {"exists": True, "url": f"https://t.me/{username}"}
+                else:
+                    return {"exists": False}
+    except:
+        pass
+    return {"exists": False}
+
+@safe_request
+async def zippopotam_lookup(postal_code: str, country: str = "RU") -> dict:
+    """zippopotam.us — бесплатно, без ключа"""
+    url = f"https://api.zippopotam.us/{country}/{postal_code}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "country": data.get('country', '—'),
+                    "places": data.get('places', [])[:3]
+                }
+    return None
+
+# ==================== НОВЫЕ ФУНКЦИИ ====================
+
+async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if stdout:
+            data = json.loads(stdout)
+            if data.get('results'):
+                return {
+                    "found": True,
+                    "total": len(data['results']),
+                    "businesses": data['results'][:5],
+                    "source": "LeadFinder"
+                }
+    except:
+        pass
+    return None
+
+async def telegram_bot_parser(phone: str) -> dict:
+    results = {}
+    bots = {
+        "sherlock": "https://sherlock-tg.vercel.app/api/search?q={phone}",
+        "osant": "https://osant-bot.vercel.app/api/phone?number={phone}",
+    }
+    for name, url_template in bots.items():
+        try:
+            url = url_template.format(phone=phone)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results[name] = data
+        except:
+            pass
+    if results:
+        return {"found": True, "results": results, "source": "TelegramBots"}
+    return None
+
+async def freephonenum_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.freephonenum.com/search?q={clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .card, .phone-info')[:3]:
+                        title = item.select_one('.title, .name')
+                        text = item.select_one('.description, .text')
+                        if title:
+                            results.append({
+                                "title": title.get_text(strip=True),
+                                "text": text.get_text(strip=True) if text else "—"
+                            })
+                    return results
+    except:
+        pass
+    return []
+
+async def phonesearch_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.phonesearch.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person, .card')[:3]:
+                        name = item.select_one('.name, .title')
+                        address = item.select_one('.address, .location')
+                        if name:
+                            results.append({
+                                "title": name.get_text(strip=True),
+                                "extra": address.get_text(strip=True) if address else "—"
+                            })
+                    return results
+    except:
+        pass
+    return []
+
+async def callerid_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.callerid.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .card, .info')[:3]:
+                        name = item.select_one('.name, .title')
+                        spam = item.select_one('.spam, .warning')
+                        if name:
+                            results.append({
+                                "title": name.get_text(strip=True),
+                                "extra": spam.get_text(strip=True) if spam else "Не спам"
+                            })
+                    return results
+    except:
+        pass
+    return []
+
+async def numberlookup_api(phone: str) -> dict:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://numberlookupapi.com/api?number={clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('valid'):
+                        return {
+                            "country": data.get('country', '—'),
+                            "carrier": data.get('carrier', '—'),
+                            "line_type": data.get('line_type', '—')
+                        }
+    except:
+        pass
     return None
 
 # ==================== ПАРСЕРЫ ====================
@@ -462,7 +661,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     results = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=15) as resp:
+            async with session.get(url, headers=headers, timeout=30) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     soup = BeautifulSoup(html, 'html.parser')
@@ -552,7 +751,7 @@ async def fssp_lookup(fio: str) -> dict:
     try:
         params = {"name": fio}
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", params=params, timeout=10) as resp:
+            async with session.get("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", params=params, timeout=30) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get("response", {}).get("count"):
@@ -564,139 +763,6 @@ async def fssp_lookup(fio: str) -> dict:
     except:
         pass
     return {"found": False}
-
-# ==================== НОВЫЕ ФУНКЦИИ (БЕЗ CLI) ====================
-
-async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if stdout:
-            data = json.loads(stdout)
-            if data.get('results'):
-                return {
-                    "found": True,
-                    "total": len(data['results']),
-                    "businesses": data['results'][:5],
-                    "source": "LeadFinder"
-                }
-    except:
-        pass
-    return None
-
-async def telegram_bot_parser(phone: str) -> dict:
-    results = {}
-    bots = {
-        "sherlock": "https://sherlock-tg.vercel.app/api/search?q={phone}",
-        "osant": "https://osant-bot.vercel.app/api/phone?number={phone}",
-    }
-    for name, url_template in bots.items():
-        try:
-            url = url_template.format(phone=phone)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        results[name] = data
-        except:
-            pass
-    if results:
-        return {"found": True, "results": results, "source": "TelegramBots"}
-    return None
-
-async def freephonenum_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.freephonenum.com/search?q={clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .card, .phone-info')[:3]:
-                        title = item.select_one('.title, .name')
-                        text = item.select_one('.description, .text')
-                        if title:
-                            results.append({
-                                "title": title.get_text(strip=True),
-                                "text": text.get_text(strip=True) if text else "—"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-async def phonesearch_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.phonesearch.com/phone/{clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .person, .card')[:3]:
-                        name = item.select_one('.name, .title')
-                        address = item.select_one('.address, .location')
-                        if name:
-                            results.append({
-                                "title": name.get_text(strip=True),
-                                "extra": address.get_text(strip=True) if address else "—"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-async def callerid_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.callerid.com/phone/{clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .card, .info')[:3]:
-                        name = item.select_one('.name, .title')
-                        spam = item.select_one('.spam, .warning')
-                        if name:
-                            results.append({
-                                "title": name.get_text(strip=True),
-                                "extra": spam.get_text(strip=True) if spam else "Не спам"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-async def numberlookup_api(phone: str) -> dict:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://numberlookupapi.com/api?number={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('valid'):
-                        return {
-                            "country": data.get('country', '—'),
-                            "carrier": data.get('carrier', '—'),
-                            "line_type": data.get('line_type', '—')
-                        }
-    except:
-        pass
-    return None
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
@@ -769,11 +835,14 @@ async def global_lookup(query: str) -> dict:
             ("xray", xray_lookup(query)),
             ("idcrawl", idcrawl_lookup(query)),
             ("duckduckgo", duckduckgo_search(query)),
+            ("github", github_username_lookup(query)),
+            ("telegram", telegram_username_lookup(query)),
         ]
     
     elif qtype == "ip":
         tasks = [
             ("ipinfo", ipinfo_lookup(query)),
+            ("ip_api", ip_api_lookup(query)),
             ("duckduckgo", duckduckgo_search(query)),
         ]
     else:
@@ -1173,7 +1242,7 @@ def callback_handler(call):
                 "• IP: 8.8.8.8\n"
                 "• Домен: example.com\n"
                 "• Любой текст\n\n"
-                "ℹ️ 30+ OSINT-источников",
+                "ℹ️ 35+ OSINT-источников",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1322,12 +1391,21 @@ def handle_text(message):
             bot.reply_to(message, "❌ *Лимит поисков исчерпан!*\n\n⏰ Сброс в 00:00 МСК", parse_mode="Markdown")
             return
         
-        msg = bot.reply_to(message, "⏳ Поиск по 30+ источникам...")
+        # Отправляем сообщение с приблизительным временем
+        start_time = time.time()
+        msg = bot.reply_to(
+            message,
+            "⏳ *Поиск по 35+ источникам...*\n"
+            "⏱️ Приблизительное время: ~15-30 секунд",
+            parse_mode="Markdown"
+        )
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         data = loop.run_until_complete(global_lookup(text))
         loop.close()
+        
+        elapsed = time.time() - start_time
         
         total = data.get("total_results", 0)
         remaining = use_search(user_id)
@@ -1345,7 +1423,11 @@ def handle_text(message):
             bot.send_document(
                 chat_id,
                 f,
-                caption=f"📊 *OSINT-отчёт*\n\n🔍 Запрос: `{text}`\n📌 Найдено: **{total}**\n🔍 Осталось: **{remaining}/3**",
+                caption=f"📊 *OSINT-отчёт*\n\n"
+                        f"🔍 Запрос: `{text}`\n"
+                        f"📌 Найдено: **{total}**\n"
+                        f"🔍 Осталось: **{remaining}/3**\n"
+                        f"⏱️ Время поиска: **{elapsed:.1f} сек**",
                 parse_mode="Markdown"
             )
         

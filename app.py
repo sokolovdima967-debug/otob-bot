@@ -30,16 +30,12 @@ OMKAR_KEY = os.environ.get("OMKAR_KEY")
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
 ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
+HUNTER_KEY = os.environ.get("HUNTER_KEY")
 
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
 
-# ========== НАСТРОЙКА ЛОГГИРОВАНИЯ ==========
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -60,7 +56,7 @@ def init_db():
         conn.close()
         logger.info("✅ База данных инициализирована")
     except Exception as e:
-        logger.error(f"❌ Ошибка инициализации БД: {e}")
+        logger.error(f"❌ Ошибка БД: {e}")
 
 def get_user(user_id: int, username: str = None):
     try:
@@ -101,7 +97,7 @@ def reset_daily_searches():
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"❌ Ошибка reset_daily_searches: {e}")
+        logger.error(f"❌ Ошибка reset: {e}")
 
 def can_search(user_id: int) -> bool:
     if user_id == ADMIN_ID:
@@ -110,8 +106,7 @@ def can_search(user_id: int) -> bool:
         reset_daily_searches()
         user = get_user(user_id)
         return user["searches_today"] < 3 or user["searches_extra"] > 0
-    except Exception as e:
-        logger.error(f"❌ Ошибка can_search: {e}")
+    except:
         return False
 
 def use_search(user_id: int) -> int:
@@ -128,8 +123,7 @@ def use_search(user_id: int) -> int:
             return 0
         update_user(user_id, user)
         return get_remaining(user_id)
-    except Exception as e:
-        logger.error(f"❌ Ошибка use_search: {e}")
+    except:
         return 0
 
 def get_remaining(user_id: int) -> int:
@@ -138,21 +132,15 @@ def get_remaining(user_id: int) -> int:
     try:
         user = get_user(user_id)
         return (3 - user["searches_today"]) + user["searches_extra"]
-    except Exception as e:
-        logger.error(f"❌ Ошибка get_remaining: {e}")
+    except:
         return 0
 
 # ==================== ХРАНИЛИЩЕ ОТЧЁТОВ ====================
 reports = {}
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
-try:
-    bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
-    bot.remove_webhook()
-    logger.info("✅ Бот инициализирован")
-except Exception as e:
-    logger.error(f"❌ Ошибка инициализации бота: {e}")
-    sys.exit(1)
+bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+bot.remove_webhook()
 
 # ==================== HTTP-СЕРВЕР ====================
 
@@ -181,22 +169,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"Not found")
         except Exception as e:
-            logger.error(f"❌ HTTP-сервер ошибка: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(b"Internal Server Error")
-    
-    def do_HEAD(self):
-        try:
-            if self.path == '/' or self.path == '/health':
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-            else:
-                self.send_response(404)
-                self.end_headers()
-        except Exception as e:
-            logger.error(f"❌ HTTP-сервер HEAD ошибка: {e}")
+            logger.error(f"HTTP error: {e}")
 
 def run_http_server():
     try:
@@ -207,7 +180,7 @@ def run_http_server():
         thread.start()
         logger.info(f"✅ HTTP-сервер запущен на порту {port}")
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска HTTP-сервера: {e}")
+        logger.error(f"❌ Ошибка HTTP-сервера: {e}")
 
 run_http_server()
 
@@ -223,18 +196,14 @@ def generate_otob_title(query: str, qtype: str) -> str:
     return random.choice(templates)
 
 def safe_request(func):
-    """Декоратор для безопасного выполнения асинхронных запросов"""
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
         except asyncio.TimeoutError:
             logger.warning(f"⏰ Таймаут в {func.__name__}")
             return None
-        except aiohttp.ClientError as e:
-            logger.error(f"🌐 Ошибка соединения в {func.__name__}: {e}")
-            return None
         except Exception as e:
-            logger.error(f"❌ Ошибка в {func.__name__}: {e}\n{traceback.format_exc()}")
+            logger.error(f"❌ Ошибка в {func.__name__}: {e}")
             return None
     return wrapper
 
@@ -255,7 +224,7 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== API ФУНКЦИИ (с обработкой ошибок) ====================
+# ==================== API ФУНКЦИИ ====================
 
 @safe_request
 async def numverify_lookup(phone: str) -> dict:
@@ -377,10 +346,7 @@ async def hlr_lookup(phone: str) -> dict:
         async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.text()
-                if 'OK' in data:
-                    return {"status": "✅ Активен"}
-                else:
-                    return {"status": "❌ Не активен"}
+                return {"status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
     return None
 
 @safe_request
@@ -400,32 +366,21 @@ async def hudsonrock_lookup(phone: str) -> dict:
     return None
 
 @safe_request
-async def osintui_lookup(phone: str) -> dict:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://osint-ui.com/api/phone?number={clean}"
+async def hunter_lookup(email: str) -> dict:
+    if not HUNTER_KEY:
+        return None
+    url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_KEY}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
+                result = data.get('data', {})
                 return {
-                    "country": data.get('country', '—'),
-                    "carrier": data.get('carrier', '—'),
-                    "line_type": data.get('line_type', '—')
-                }
-    return None
-
-@safe_request
-async def phoneinfoga_api_lookup(phone: str) -> dict:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://phoneinfoga.net/api/scan?number={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=15) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "country": data.get('country', '—'),
-                    "carrier": data.get('carrier', '—'),
-                    "line_type": data.get('line_type', '—')
+                    "status": result.get('status', '—'),
+                    "score": result.get('score', 0),
+                    "first_name": result.get('first_name', '—'),
+                    "last_name": result.get('last_name', '—'),
+                    "company": result.get('company', '—')
                 }
     return None
 
@@ -453,226 +408,6 @@ async def hibp_lookup(email: str) -> list:
                 return [b.get('Name') for b in data]
     return []
 
-# ==================== ПАРСИНГ САЙТОВ (с обработкой ошибок) ====================
-
-@safe_request
-async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
-    headers = {
-        "User-Agent": random.choice([
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
-        ]),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
-    results = []
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, timeout=15) as resp:
-            if resp.status == 200:
-                html = await resp.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
-                for item in items[:max_results]:
-                    title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
-                    link_elem = item.select_one(selectors.get("link", "a"))
-                    text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
-                    extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
-                    result = {
-                        "title": title_elem.get_text(strip=True) if title_elem else "—",
-                        "link": link_elem.get('href') if link_elem else None,
-                        "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
-                        "extra": extra_elem.get_text(strip=True) if extra_elem else None
-                    }
-                    if result["link"] and result["link"].startswith('/'):
-                        result["link"] = f"https://{url.split('/')[2]}{result['link']}"
-                    if result["title"] != "—" or result["text"] != "—":
-                        results.append(result)
-    return results
-
-@safe_request
-async def xray_lookup(query: str) -> list:
-    url = f"https://x-ray.contact/search?q={query}"
-    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 15)
-
-@safe_request
-async def idcrawl_lookup(query: str) -> list:
-    url = f"https://idcrawl.com/{query}"
-    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 15)
-
-@safe_request
-async def syncme_lookup(phone: str) -> list:
-    url = f"https://sync.me/search?q={phone}"
-    selectors = {"result": ".profile, .card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".phone, .location"}
-    return await parse_site(url, selectors, 5)
-
-@safe_request
-async def whoseno_lookup(phone: str) -> list:
-    url = f"https://whoseno.com/search?q={phone}"
-    selectors = {"result": ".result, .card", "title": ".name, .title", "text": ".description", "extra": ".phone"}
-    return await parse_site(url, selectors, 5)
-
-@safe_request
-async def truepeoplesearch_lookup(query: str) -> list:
-    if re.search(r'\d', query):
-        url = f"https://truepeoplesearch.com/results?phoneno={query}"
-    else:
-        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
-    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
-    return await parse_site(url, selectors, 10)
-
-@safe_request
-async def duckduckgo_search(query: str) -> list:
-    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
-    return await parse_site(url, selectors, 5)
-
-@safe_request
-async def wikipedia_lookup(query: str) -> list:
-    url = f"https://ru.wikipedia.org/wiki/{query.replace(' ', '_')}"
-    selectors = {"result": ".mw-parser-output p", "title": "h1.firstHeading", "text": ".mw-parser-output p"}
-    return await parse_site(url, selectors, 3)
-
-@safe_request
-async def truecaller_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.truecaller.com/search/{clean}"
-    selectors = {"result": ".profile, .card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".phone, .location"}
-    return await parse_site(url, selectors, 5)
-
-@safe_request
-async def spokeo_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.spokeo.com/{clean}/search"
-    selectors = {"result": ".result-item, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-@safe_request
-async def whitepages_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.whitepages.com/phone/{clean}"
-    selectors = {"result": ".card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-@safe_request
-async def fastpeoplesearch_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-@safe_request
-async def fssp_lookup(fio: str) -> dict:
-    params = {"name": fio}
-    async with aiohttp.ClientSession() as session:
-        async with session.get("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", params=params, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get("response", {}).get("count"):
-                    return {
-                        "found": True,
-                        "count": data["response"]["count"],
-                        "debts": data["response"].get("items", [])[:3]
-                    }
-    return {"found": False}
-
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
-
-async def global_lookup(query: str) -> dict:
-    query = query.strip()
-    qtype = detect_query_type(query)
-    
-    result = {
-        "query": query,
-        "type": qtype,
-        "timestamp": datetime.now().isoformat(),
-        "sources": {},
-        "total_results": 0
-    }
-    
-    total = 0
-    tasks = []
-    
-    if qtype == "phone":
-        # API источники
-        tasks.extend([
-            ("numverify", numverify_lookup(query)),
-            ("veriphone", veriphone_lookup(query)),
-            ("abstractapi", abstractapi_lookup(query)),
-            ("bigdatacloud", bigdatacloud_lookup(query)),
-            ("omkarcloud", omkarcloud_lookup(query)),
-            ("htmlweb", htmlweb_lookup(query)),
-            ("hlr", hlr_lookup(query)),
-            ("hudsonrock", hudsonrock_lookup(query)),
-            ("osintui", osintui_lookup(query)),
-            ("phoneinfoga", phoneinfoga_api_lookup(query)),
-        ])
-        
-        # Парсинг источники
-        tasks.extend([
-            ("xray", xray_lookup(query)),
-            ("idcrawl", idcrawl_lookup(query)),
-            ("syncme", syncme_lookup(query)),
-            ("whoseno", whoseno_lookup(query)),
-            ("truepeoplesearch", truepeoplesearch_lookup(query)),
-            ("truecaller", truecaller_parse(query)),
-            ("spokeo", spokeo_parse(query)),
-            ("whitepages", whitepages_parse(query)),
-            ("fastpeoplesearch", fastpeoplesearch_parse(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-            ("wikipedia", wikipedia_lookup(query)),
-        ])
-        
-        # ФССП (требует ФИО)
-        if len(query.split()) >= 2:
-            tasks.append(("fssp", fssp_lookup(query)))
-    
-    elif qtype == "email":
-        tasks.extend([
-            ("emailrep", emailrep_lookup(query)),
-            ("hibp", hibp_lookup(query)),
-            ("hudsonrock", hudsonrock_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-        ])
-    
-    elif qtype == "domain":
-        tasks.extend([
-            ("duckduckgo", duckduckgo_search(query)),
-            ("crtsh", crtsh_lookup(query)),
-            ("whois", whois_lookup(query)),
-        ])
-    
-    elif qtype == "username":
-        tasks.extend([
-            ("xray", xray_lookup(query)),
-            ("idcrawl", idcrawl_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-        ])
-    
-    elif qtype == "ip":
-        tasks.extend([
-            ("ipinfo", ipinfo_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-        ])
-    
-    # Запускаем все задачи параллельно
-    if tasks:
-        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-        for idx, (name, _) in enumerate(tasks):
-            if results[idx] and not isinstance(results[idx], Exception):
-                result["sources"][name] = results[idx]
-                if isinstance(results[idx], list):
-                    total += len(results[idx])
-                else:
-                    total += 1
-    
-    result["total_results"] = total
-    return result
-
-# ==================== НОВЫЕ API ДЛЯ IP И ДОМЕНОВ ====================
-
 @safe_request
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
@@ -684,8 +419,7 @@ async def ipinfo_lookup(ip: str) -> dict:
                     "country": data.get('country', '—'),
                     "city": data.get('city', '—'),
                     "region": data.get('region', '—'),
-                    "org": data.get('org', '—'),
-                    "asn": data.get('asn', '—')
+                    "org": data.get('org', '—')
                 }
     return None
 
@@ -713,6 +447,271 @@ async def whois_lookup(domain: str) -> dict:
                     "expiration_date": data.get('expiration_date', '—')
                 }
     return None
+
+# ==================== CLI-ИНСТРУМЕНТЫ ====================
+
+async def werewiks_lookup(query: str) -> dict:
+    """Поиск в 400+ утечках через WEREWIKS"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "werewiks", query,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if stdout:
+            return {"found": True, "results": stdout.decode()[:500], "source": "WEREWIKS"}
+    except asyncio.TimeoutError:
+        logger.warning("WEREWIKS timeout")
+    except Exception as e:
+        logger.error(f"WEREWIKS error: {e}")
+    return None
+
+async def diginetra_lookup(query: str, qtype: str) -> dict:
+    """Поиск через DIGI-NETRA"""
+    try:
+        qtype_map = {"phone": "--phone", "email": "--email", "username": "--username"}
+        if qtype not in qtype_map:
+            return None
+        cmd = ["python3", "/digi-netra/netra.py", qtype_map[qtype], query]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if stdout:
+            return {"found": True, "results": stdout.decode()[:500], "source": "DIGI-NETRA"}
+    except asyncio.TimeoutError:
+        logger.warning("DIGI-NETRA timeout")
+    except Exception as e:
+        logger.error(f"DIGI-NETRA error: {e}")
+    return None
+
+async def xtra_lookup(domain: str) -> dict:
+    """Скрапинг сайта через XTRA"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "/xtra/xtra.sh", domain, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if stdout:
+            data = json.loads(stdout)
+            return {
+                "emails": data.get('emails', []),
+                "phones": data.get('phones', []),
+                "socials": data.get('socials', []),
+                "source": "XTRA"
+            }
+    except asyncio.TimeoutError:
+        logger.warning("XTRA timeout")
+    except Exception as e:
+        logger.error(f"XTRA error: {e}")
+    return None
+
+async def creepyeye_lookup(query: str, qtype: str) -> dict:
+    """Модульный поиск через CreepyEYE-Genesis"""
+    try:
+        cmd = ["python3", "/creepyeye/creepyeye.py", "--type", qtype, "--query", query, "--json"]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if stdout:
+            data = json.loads(stdout)
+            return {"results": data.get('results', {}), "source": "CreepyEYE"}
+    except asyncio.TimeoutError:
+        logger.warning("CreepyEYE timeout")
+    except Exception as e:
+        logger.error(f"CreepyEYE error: {e}")
+    return None
+
+# ==================== ПАРСИНГ САЙТОВ ====================
+
+async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
+    headers = {
+        "User-Agent": random.choice([
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+        ]),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    }
+    results = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=15) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
+                    for item in items[:max_results]:
+                        title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
+                        link_elem = item.select_one(selectors.get("link", "a"))
+                        text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
+                        extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
+                        result = {
+                            "title": title_elem.get_text(strip=True) if title_elem else "—",
+                            "link": link_elem.get('href') if link_elem else None,
+                            "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
+                            "extra": extra_elem.get_text(strip=True) if extra_elem else None
+                        }
+                        if result["link"] and result["link"].startswith('/'):
+                            result["link"] = f"https://{url.split('/')[2]}{result['link']}"
+                        if result["title"] != "—" or result["text"] != "—":
+                            results.append(result)
+    except Exception as e:
+        logger.error(f"Parse error for {url}: {e}")
+    return results
+
+async def xray_lookup(query: str) -> list:
+    url = f"https://x-ray.contact/search?q={query}"
+    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 15)
+
+async def idcrawl_lookup(query: str) -> list:
+    url = f"https://idcrawl.com/{query}"
+    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 15)
+
+async def syncme_lookup(phone: str) -> list:
+    url = f"https://sync.me/search?q={phone}"
+    selectors = {"result": ".profile, .card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".phone, .location"}
+    return await parse_site(url, selectors, 5)
+
+async def whoseno_lookup(phone: str) -> list:
+    url = f"https://whoseno.com/search?q={phone}"
+    selectors = {"result": ".result, .card", "title": ".name, .title", "text": ".description", "extra": ".phone"}
+    return await parse_site(url, selectors, 5)
+
+async def truepeoplesearch_lookup(query: str) -> list:
+    if re.search(r'\d', query):
+        url = f"https://truepeoplesearch.com/results?phoneno={query}"
+    else:
+        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
+    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
+    return await parse_site(url, selectors, 10)
+
+async def duckduckgo_search(query: str) -> list:
+    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
+    return await parse_site(url, selectors, 5)
+
+async def wikipedia_lookup(query: str) -> list:
+    url = f"https://ru.wikipedia.org/wiki/{query.replace(' ', '_')}"
+    selectors = {"result": ".mw-parser-output p", "title": "h1.firstHeading", "text": ".mw-parser-output p"}
+    return await parse_site(url, selectors, 3)
+
+async def fssp_lookup(fio: str) -> dict:
+    try:
+        params = {"name": fio}
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", params=params, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("response", {}).get("count"):
+                        return {
+                            "found": True,
+                            "count": data["response"]["count"],
+                            "debts": data["response"].get("items", [])[:3]
+                        }
+    except:
+        pass
+    return {"found": False}
+
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
+
+async def global_lookup(query: str) -> dict:
+    query = query.strip()
+    qtype = detect_query_type(query)
+    
+    result = {
+        "query": query,
+        "type": qtype,
+        "timestamp": datetime.now().isoformat(),
+        "sources": {},
+        "total_results": 0
+    }
+    
+    total = 0
+    tasks = []
+    
+    if qtype == "phone":
+        tasks = [
+            ("numverify", numverify_lookup(query)),
+            ("veriphone", veriphone_lookup(query)),
+            ("abstractapi", abstractapi_lookup(query)),
+            ("bigdatacloud", bigdatacloud_lookup(query)),
+            ("omkarcloud", omkarcloud_lookup(query)),
+            ("htmlweb", htmlweb_lookup(query)),
+            ("hlr", hlr_lookup(query)),
+            ("hudsonrock", hudsonrock_lookup(query)),
+            ("werewiks", werewiks_lookup(query)),
+            ("diginetra", diginetra_lookup(query, "phone")),
+            ("creepyeye", creepyeye_lookup(query, "phone")),
+            ("xray", xray_lookup(query)),
+            ("idcrawl", idcrawl_lookup(query)),
+            ("syncme", syncme_lookup(query)),
+            ("whoseno", whoseno_lookup(query)),
+            ("truepeoplesearch", truepeoplesearch_lookup(query)),
+            ("duckduckgo", duckduckgo_search(query)),
+            ("wikipedia", wikipedia_lookup(query)),
+        ]
+        if len(query.split()) >= 2:
+            tasks.append(("fssp", fssp_lookup(query)))
+    
+    elif qtype == "email":
+        tasks = [
+            ("emailrep", emailrep_lookup(query)),
+            ("hibp", hibp_lookup(query)),
+            ("hudsonrock", hudsonrock_lookup(query)),
+            ("hunter", hunter_lookup(query)),
+            ("werewiks", werewiks_lookup(query)),
+            ("diginetra", diginetra_lookup(query, "email")),
+            ("creepyeye", creepyeye_lookup(query, "email")),
+            ("duckduckgo", duckduckgo_search(query)),
+        ]
+    
+    elif qtype == "domain":
+        tasks = [
+            ("xtra", xtra_lookup(query)),
+            ("crtsh", crtsh_lookup(query)),
+            ("whois", whois_lookup(query)),
+            ("duckduckgo", duckduckgo_search(query)),
+        ]
+    
+    elif qtype == "username":
+        tasks = [
+            ("diginetra", diginetra_lookup(query, "username")),
+            ("xray", xray_lookup(query)),
+            ("idcrawl", idcrawl_lookup(query)),
+            ("duckduckgo", duckduckgo_search(query)),
+        ]
+    
+    elif qtype == "ip":
+        tasks = [
+            ("ipinfo", ipinfo_lookup(query)),
+            ("duckduckgo", duckduckgo_search(query)),
+        ]
+    else:
+        tasks = [("duckduckgo", duckduckgo_search(query))]
+    
+    if tasks:
+        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
+        for idx, (name, _) in enumerate(tasks):
+            if results[idx] and not isinstance(results[idx], Exception):
+                result["sources"][name] = results[idx]
+                if isinstance(results[idx], list):
+                    total += len(results[idx])
+                else:
+                    total += 1
+    
+    result["total_results"] = total
+    return result
 
 # ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
@@ -872,7 +871,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #1a0a0a; font-size: 12px; color: #4a2a2a; text-align: center; }}
         .footer a {{ color: #7a3a3a; text-decoration: none; }}
         .footer a:hover {{ color: #aa5a5a; }}
-        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header {{ padding-left: 0; padding-top: 70px; }} .watermark {{ top: 10px; left: 15px; }} .watermark svg {{ width: 40px; height: 50px; }} .watermark .text {{ font-size: 10px; }} }}
+        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header {{ padding-left: 0; padding-top: 70px; }} .watermark {{ top: 10px; left: 15px; }} .watermark svg {{ width: 40px; height: 50px; }} }}
     </style>
 </head>
 <body>
@@ -981,7 +980,7 @@ def functions_menu_keyboard():
     )
     return markup
 
-# ==================== ОБРАБОТЧИКИ КНОПОК ====================
+# ==================== ОБРАБОТЧИКИ ====================
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -1025,11 +1024,9 @@ def callback_handler(call):
                 f"🆔 ID: `{user.id}`\n"
                 f"👤 Username: @{user.username or 'нет'}\n"
                 f"📛 Имя: {user.first_name or '—'}\n\n"
-                "━━━━━━━━━━━━━━━━━━\n"
                 f"📊 Использовано: {user_data['searches_today']}/3\n"
                 f"📊 Бонусных: {user_data['searches_extra']}\n"
                 f"📊 Осталось: {remaining}\n"
-                "━━━━━━━━━━━━━━━━━━\n"
                 f"⏰ Сброс: в 00:00 МСК\n"
                 f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
             )
@@ -1051,11 +1048,9 @@ def callback_handler(call):
             extra = get_user(user_id)["searches_extra"]
             text = (
                 "📊 *Твой баланс*\n\n"
-                "━━━━━━━━━━━━━━━━━━\n"
                 f"🔍 Использовано: {used}/3\n"
                 f"📊 Бонусных: {extra}\n"
                 f"📊 Осталось: {remaining}\n"
-                "━━━━━━━━━━━━━━━━━━\n"
                 f"⏰ Сброс: в 00:00 МСК\n"
                 f"👑 Админ: {'безлимитный' if user_id == ADMIN_ID else 'нет'}"
             )
@@ -1075,7 +1070,6 @@ def callback_handler(call):
                 "❓ *Помощь*\n\n"
                 "📌 *Как пользоваться:*\n"
                 "• Отправь номер, email, никнейм, IP или домен\n"
-                "• Используй кнопки меню\n"
                 "• Глобальный поиск — всё в одном запросе\n\n"
                 "📊 *Лимит:* 3 поиска в день (сброс в 00:00 МСК)\n"
                 "👑 *Админ:* безлимитный доступ\n\n"
@@ -1093,14 +1087,14 @@ def callback_handler(call):
             bot.edit_message_text(
                 "🌐 *Глобальный поиск*\n\n"
                 "Отправь запрос для поиска:\n"
-                "• Номер телефона: +79991234567\n"
+                "• Номер: +79991234567\n"
                 "• ФИО: Иванов Иван Иванович\n"
                 "• Email: user@example.com\n"
                 "• Никнейм: username\n"
-                "• IP-адрес: 8.8.8.8\n"
+                "• IP: 8.8.8.8\n"
                 "• Домен: example.com\n"
                 "• Любой текст\n\n"
-                "ℹ️ Бот использует 30+ OSINT-источников.",
+                "ℹ️ 28+ OSINT-источников",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1128,7 +1122,7 @@ def callback_handler(call):
             bot.edit_message_text(
                 "📱 *Проверка телефона*\n\n"
                 "Отправь номер для проверки.\n\n"
-                "Пример: +79991234567 или 79991234567",
+                "Пример: +79991234567",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1153,38 +1147,32 @@ def callback_handler(call):
             return
             
     except Exception as e:
-        logger.error(f"❌ Ошибка в callback_handler: {e}\n{traceback.format_exc()}")
-        try:
-            bot.send_message(call.message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.")
-        except:
-            pass
+        logger.error(f"❌ Callback error: {e}")
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
     try:
-        user_id = message.from_user.id
-        remaining = get_remaining(user_id)
-        
+        remaining = get_remaining(message.from_user.id)
         bot.send_message(
             message.chat.id,
             f"🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
             f"👋 Привет, {message.from_user.first_name}!\n\n"
-            f"📊 *Осталось поисков:* {remaining}/3\n\n"
+            f"📊 *Осталось:* {remaining}/3\n\n"
             f"📌 *Выбери действие:*",
             parse_mode="Markdown",
             reply_markup=main_menu_keyboard()
         )
     except Exception as e:
-        logger.error(f"❌ Ошибка start_command: {e}")
+        logger.error(f"Start error: {e}")
 
 @bot.message_handler(commands=['give'])
 def give_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
     try:
-        if message.from_user.id != ADMIN_ID:
-            bot.reply_to(message, "❌ Только для админа.")
-            return
         args = message.text.split()
         if len(args) < 3:
             bot.reply_to(message, "❗ /give <кол-во> <user_id>")
@@ -1195,18 +1183,15 @@ def give_command(message):
         user["searches_today"] = max(0, user["searches_today"] - amount)
         update_user(target_id, user)
         bot.reply_to(message, f"✅ Выдано {amount} запросов пользователю `{target_id}`.", parse_mode="Markdown")
-    except ValueError:
-        bot.reply_to(message, "❌ Кол-во и ID должны быть числами.")
-    except Exception as e:
-        logger.error(f"❌ Ошибка give_command: {e}")
-        bot.reply_to(message, "⚠️ Ошибка при выполнении команды.")
+    except:
+        bot.reply_to(message, "⚠️ Ошибка. /give <кол-во> <user_id>")
 
 @bot.message_handler(commands=['take'])
 def take_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
     try:
-        if message.from_user.id != ADMIN_ID:
-            bot.reply_to(message, "❌ Только для админа.")
-            return
         args = message.text.split()
         if len(args) < 3:
             bot.reply_to(message, "❗ /take <кол-во> <user_id>")
@@ -1217,18 +1202,15 @@ def take_command(message):
         user["searches_extra"] = max(0, user["searches_extra"] - amount)
         update_user(target_id, user)
         bot.reply_to(message, f"✅ Забрано {amount} запросов у пользователя `{target_id}`.", parse_mode="Markdown")
-    except ValueError:
-        bot.reply_to(message, "❌ Кол-во и ID должны быть числами.")
-    except Exception as e:
-        logger.error(f"❌ Ошибка take_command: {e}")
-        bot.reply_to(message, "⚠️ Ошибка при выполнении команды.")
+    except:
+        bot.reply_to(message, "⚠️ Ошибка. /take <кол-во> <user_id>")
 
 @bot.message_handler(commands=['users'])
 def users_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
     try:
-        if message.from_user.id != ADMIN_ID:
-            bot.reply_to(message, "❌ Только для админа.")
-            return
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT user_id, username, searches_today, searches_extra FROM users ORDER BY searches_today DESC")
@@ -1243,10 +1225,7 @@ def users_command(message):
             text += f"• `{user_id}` — @{username or 'нет'} | запросов: {total}\n"
         bot.reply_to(message, text, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка users_command: {e}")
-        bot.reply_to(message, "⚠️ Ошибка при получении списка пользователей.")
-
-# ==================== ОБРАБОТЧИК ТЕКСТА ====================
+        bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
@@ -1259,83 +1238,50 @@ def handle_text(message):
         chat_id = message.chat.id
         
         if not can_search(user_id):
-            bot.reply_to(
-                message,
-                f"❌ *Лимит поисков исчерпан!*\n\n"
-                f"Вы использовали все 3 поиска на сегодня.\n"
-                f"⏰ Следующий сброс — в 00:00 МСК.",
-                parse_mode="Markdown"
-            )
+            bot.reply_to(message, "❌ *Лимит поисков исчерпан!*\n\n⏰ Сброс в 00:00 МСК", parse_mode="Markdown")
             return
         
-        msg = bot.reply_to(message, "⏳ Выполняется глобальный поиск по 30+ источникам...")
+        msg = bot.reply_to(message, "⏳ Поиск по 28+ источникам...")
         
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            data = loop.run_until_complete(global_lookup(text))
-            loop.close()
-            
-            total = data.get("total_results", 0)
-            remaining = use_search(user_id)
-            
-            report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-            html = generate_html_report(text, data, report_id)
-            
-            reports[report_id] = {
-                "query": text,
-                "data": data,
-                "html": html,
-                "created": datetime.now().timestamp()
-            }
-            
-            filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write(html)
-            
-            with open(filename, "rb") as f:
-                bot.send_document(
-                    chat_id,
-                    f,
-                    caption=f"📊 *OSINT-отчёт*\n\n"
-                            f"🔍 Запрос: `{text}`\n"
-                            f"📌 Найдено: **{total}** результатов\n"
-                            f"🔍 Осталось: **{remaining}/3**",
-                    parse_mode="Markdown"
-                )
-            
-            os.remove(filename)
-            bot.delete_message(chat_id, msg.message_id)
-            
-        except asyncio.TimeoutError:
-            bot.edit_message_text(
-                "⏰ *Превышено время ожидания!*\n\n"
-                "Поиск занял слишком много времени.\n"
-                "Попробуйте позже.",
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        data = loop.run_until_complete(global_lookup(text))
+        loop.close()
+        
+        total = data.get("total_results", 0)
+        remaining = use_search(user_id)
+        
+        report_id = f"{user_id}_{int(datetime.now().timestamp())}"
+        html = generate_html_report(text, data, report_id)
+        
+        reports[report_id] = {"query": text, "data": data, "html": html, "created": datetime.now().timestamp()}
+        
+        filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(html)
+        
+        with open(filename, "rb") as f:
+            bot.send_document(
                 chat_id,
-                msg.message_id,
+                f,
+                caption=f"📊 *OSINT-отчёт*\n\n🔍 Запрос: `{text}`\n📌 Найдено: **{total}**\n🔍 Осталось: **{remaining}/3**",
                 parse_mode="Markdown"
             )
-        except Exception as e:
-            logger.error(f"❌ Ошибка глобального поиска: {e}\n{traceback.format_exc()}")
-            bot.edit_message_text(
-                f"⚠️ *Ошибка при поиске:*\n`{str(e)[:100]}`",
-                chat_id,
-                msg.message_id,
-                parse_mode="Markdown"
-            )
-            
+        
+        os.remove(filename)
+        bot.delete_message(chat_id, msg.message_id)
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка handle_text: {e}\n{traceback.format_exc()}")
+        logger.error(f"❌ Ошибка: {e}")
+        try:
+            bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+        except:
+            pass
 
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
-    try:
-        init_db()
-        logger.info("🚀 OTOB бот запускается...")
-        bot.remove_webhook()
-        bot.infinity_polling(timeout=60, long_polling_timeout=30)
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка при запуске: {e}\n{traceback.format_exc()}")
-        sys.exit(1)
+    init_db()
+    logger.info("🚀 OTOB бот запускается...")
+    bot.remove_webhook()
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)

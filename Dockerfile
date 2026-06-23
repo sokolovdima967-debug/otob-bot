@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y \
     git wget gcc g++ make curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Установка Go (для WEREWIKS)
+# Установка Go (для других инструментов)
 RUN wget https://golang.org/dl/go1.22.5.linux-amd64.tar.gz && \
     tar -C /usr/local -xzf go1.22.5.linux-amd64.tar.gz && \
     rm go1.22.5.linux-amd64.tar.gz
@@ -13,8 +13,7 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 ENV GOPATH="/go"
 ENV PATH="${GOPATH}/bin:${PATH}"
 
-# Установка WEREWIKS
-RUN go install github.com/v0lc3/WEREWIKS@latest
+# ===== УДАЛЕНО: WEREWIKS (репозиторий приватный/удалён) =====
 
 # Установка DIGI-NETRA
 RUN git clone https://github.com/Kauravsrestha-Duryodhan/DIGI-NETRA.git /digi-netra && \
@@ -40,8 +39,6 @@ RUN pip install --no-cache-dir \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-
-# ===== ИЗМЕНЕНО: bot.py → app.py =====
 COPY app.py .
 
 CMD ["python", "app.py"]

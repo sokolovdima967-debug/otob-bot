@@ -224,7 +224,7 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== СТАРЫЕ API ФУНКЦИИ ====================
+# ==================== API ФУНКЦИИ ====================
 
 @safe_request
 async def numverify_lookup(phone: str) -> dict:
@@ -448,170 +448,7 @@ async def whois_lookup(domain: str) -> dict:
                 }
     return None
 
-# ==================== НОВЫЕ ИНСТРУМЕНТЫ ====================
-
-# ----- 1. LeadFinder (через npx, без установки) -----
-async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if stdout:
-            data = json.loads(stdout)
-            if data.get('results'):
-                return {
-                    "found": True,
-                    "total": len(data['results']),
-                    "businesses": data['results'][:5],
-                    "source": "LeadFinder"
-                }
-    except:
-        pass
-    return None
-
-# ----- 2. Receivesms.me (временные номера) -----
-async def receivesms_lookup():
-    try:
-        from receivesms import SMSClient
-        client = SMSClient()
-        numbers = []
-        for country in ['US', 'UK', 'DE', 'RU']:
-            try:
-                number = client.get_number(country=country)
-                if number:
-                    numbers.append({"country": country, "number": number})
-            except:
-                continue
-        if numbers:
-            return {"found": True, "numbers": numbers, "source": "Receivesms"}
-    except:
-        pass
-    return None
-
-# ----- 3. Парсер Telegram-ботов (через публичные API) -----
-async def telegram_bot_parser(phone: str) -> dict:
-    """Парсит ответы публичных Telegram-ботов (без установки)"""
-    results = {}
-    
-    # Список ботов с публичными API
-    bots = {
-        "sherlock": "https://sherlock-tg.vercel.app/api/search?q={phone}",
-        "osant": "https://osant-bot.vercel.app/api/phone?number={phone}",
-    }
-    
-    for name, url_template in bots.items():
-        try:
-            url = url_template.format(phone=phone)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        results[name] = data
-        except:
-            pass
-    
-    if results:
-        return {"found": True, "results": results, "source": "TelegramBots"}
-    return None
-
-# ----- 4. FreePhoneNum (парсинг) -----
-async def freephonenum_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.freephonenum.com/search?q={clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .card, .phone-info')[:3]:
-                        title = item.select_one('.title, .name')
-                        text = item.select_one('.description, .text')
-                        if title:
-                            results.append({
-                                "title": title.get_text(strip=True),
-                                "text": text.get_text(strip=True) if text else "—"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-# ----- 5. PhoneSearch (парсинг) -----
-async def phonesearch_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.phonesearch.com/phone/{clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .person, .card')[:3]:
-                        name = item.select_one('.name, .title')
-                        address = item.select_one('.address, .location')
-                        if name:
-                            results.append({
-                                "title": name.get_text(strip=True),
-                                "extra": address.get_text(strip=True) if address else "—"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-# ----- 6. CallerID (парсинг) -----
-async def callerid_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.callerid.com/phone/{clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .card, .info')[:3]:
-                        name = item.select_one('.name, .title')
-                        spam = item.select_one('.spam, .warning')
-                        if name:
-                            results.append({
-                                "title": name.get_text(strip=True),
-                                "extra": spam.get_text(strip=True) if spam else "Не спам"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-# ----- 7. NumberLookup API (бесплатный) -----
-async def numberlookup_api(phone: str) -> dict:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://numberlookupapi.com/api?number={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('valid'):
-                        return {
-                            "country": data.get('country', '—'),
-                            "carrier": data.get('carrier', '—'),
-                            "line_type": data.get('line_type', '—')
-                        }
-    except:
-        pass
-    return None
-
-# ==================== СТАРЫЕ ПАРСЕРЫ ====================
+# ==================== ПАРСЕРЫ ====================
 
 async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     headers = {
@@ -728,6 +565,139 @@ async def fssp_lookup(fio: str) -> dict:
         pass
     return {"found": False}
 
+# ==================== НОВЫЕ ФУНКЦИИ (БЕЗ CLI) ====================
+
+async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if stdout:
+            data = json.loads(stdout)
+            if data.get('results'):
+                return {
+                    "found": True,
+                    "total": len(data['results']),
+                    "businesses": data['results'][:5],
+                    "source": "LeadFinder"
+                }
+    except:
+        pass
+    return None
+
+async def telegram_bot_parser(phone: str) -> dict:
+    results = {}
+    bots = {
+        "sherlock": "https://sherlock-tg.vercel.app/api/search?q={phone}",
+        "osant": "https://osant-bot.vercel.app/api/phone?number={phone}",
+    }
+    for name, url_template in bots.items():
+        try:
+            url = url_template.format(phone=phone)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results[name] = data
+        except:
+            pass
+    if results:
+        return {"found": True, "results": results, "source": "TelegramBots"}
+    return None
+
+async def freephonenum_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.freephonenum.com/search?q={clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .card, .phone-info')[:3]:
+                        title = item.select_one('.title, .name')
+                        text = item.select_one('.description, .text')
+                        if title:
+                            results.append({
+                                "title": title.get_text(strip=True),
+                                "text": text.get_text(strip=True) if text else "—"
+                            })
+                    return results
+    except:
+        pass
+    return []
+
+async def phonesearch_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.phonesearch.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person, .card')[:3]:
+                        name = item.select_one('.name, .title')
+                        address = item.select_one('.address, .location')
+                        if name:
+                            results.append({
+                                "title": name.get_text(strip=True),
+                                "extra": address.get_text(strip=True) if address else "—"
+                            })
+                    return results
+    except:
+        pass
+    return []
+
+async def callerid_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.callerid.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .card, .info')[:3]:
+                        name = item.select_one('.name, .title')
+                        spam = item.select_one('.spam, .warning')
+                        if name:
+                            results.append({
+                                "title": name.get_text(strip=True),
+                                "extra": spam.get_text(strip=True) if spam else "Не спам"
+                            })
+                    return results
+    except:
+        pass
+    return []
+
+async def numberlookup_api(phone: str) -> dict:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://numberlookupapi.com/api?number={clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('valid'):
+                        return {
+                            "country": data.get('country', '—'),
+                            "carrier": data.get('carrier', '—'),
+                            "line_type": data.get('line_type', '—')
+                        }
+    except:
+        pass
+    return None
+
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
@@ -747,7 +717,6 @@ async def global_lookup(query: str) -> dict:
     
     if qtype == "phone":
         tasks = [
-            # СТАРЫЕ API
             ("numverify", numverify_lookup(query)),
             ("veriphone", veriphone_lookup(query)),
             ("abstractapi", abstractapi_lookup(query)),
@@ -757,18 +726,11 @@ async def global_lookup(query: str) -> dict:
             ("hlr", hlr_lookup(query)),
             ("hudsonrock", hudsonrock_lookup(query)),
             ("numberlookup", numberlookup_api(query)),
-            
-            # НОВЫЕ ИНСТРУМЕНТЫ
             ("leadfinder", leadfinder_lookup(query)),
-            ("receivesms", receivesms_lookup()),
             ("telegram_bots", telegram_bot_parser(query)),
-            
-            # НОВЫЕ ПАРСЕРЫ
             ("freephonenum", freephonenum_parse(query)),
             ("phonesearch", phonesearch_parse(query)),
             ("callerid", callerid_parse(query)),
-            
-            # СТАРЫЕ ПАРСЕРЫ
             ("xray", xray_lookup(query)),
             ("idcrawl", idcrawl_lookup(query)),
             ("syncme", syncme_lookup(query)),

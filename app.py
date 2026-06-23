@@ -9,6 +9,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import importlib
 from datetime import datetime
 from bs4 import BeautifulSoup
 import telebot
@@ -32,6 +33,53 @@ if not TOKEN:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ==================== АВТОУСТАНОВКА ИНСТРУМЕНТОВ ====================
+
+def install_package(package: str):
+    """Устанавливает Python-пакет через pip"""
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet", "--no-cache-dir"])
+        logger.info(f"✅ Установлен: {package}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки {package}: {e}")
+        return False
+
+def install_npx_package(package: str):
+    """Проверяет наличие npx-пакета"""
+    try:
+        subprocess.check_call(["npx", package, "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info(f"✅ npx-пакет {package} уже установлен")
+        return True
+    except:
+        logger.info(f"📦 npx-пакет {package} будет установлен при первом запуске")
+        return False
+
+def setup_tools():
+    """Устанавливает все необходимые инструменты при первом запуске"""
+    logger.info("🔧 Проверка и установка инструментов...")
+    
+    # Список Python-пакетов для установки
+    packages = [
+        "receivesms",
+        "ptinsearcher",
+        "ainfo"
+    ]
+    
+    for package in packages:
+        try:
+            importlib.import_module(package.replace('-', '_'))
+            logger.info(f"✅ {package} уже установлен")
+        except ImportError:
+            logger.info(f"📦 Устанавливаю {package}...")
+            install_package(package)
+    
+    # Проверяем npx (LeadFinder)
+    install_npx_package("leadfinder-api")
+    
+    logger.info("✅ Все инструменты проверены!")
+    return True
 
 # ==================== ХРАНИЛИЩЕ ОТЧЁТОВ ====================
 reports = {}
@@ -304,85 +352,91 @@ async def hudsonrock_lookup(phone: str) -> dict:
         logger.error(f"HudsonRock error: {e}")
     return None
 
-# ==================== CLI-ИНСТРУМЕНТЫ (БЕЗ ТАЙМАУТА) ====================
+# ==================== НОВЫЕ УТИЛИТЫ (с автоустановкой) ====================
 
-async def phoneinfoga_lookup(phone: str) -> dict:
+# ----- 1. Receivesms.me -----
+async def receivesms_lookup():
+    try:
+        # Проверяем, установлена ли библиотека
+        try:
+            from receivesms import SMSClient
+        except ImportError:
+            logger.warning("⚠️ receivesms не установлена, пропускаем...")
+            return None
+        
+        client = SMSClient()
+        numbers = []
+        for country in ['US', 'UK', 'DE', 'RU']:
+            try:
+                number = client.get_number(country=country)
+                if number:
+                    numbers.append({"country": country, "number": number})
+            except:
+                continue
+        if numbers:
+            return {"found": True, "numbers": numbers}
+    except Exception as e:
+        logger.error(f"Receivesms error: {e}")
+    return None
+
+# ----- 2. LeadFinder (через npx) -----
+async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "phoneinfoga", "scan", "-n", phone, "--json",
+            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await proc.communicate()
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if stdout:
+            data = json.loads(stdout)
+            if data.get('results'):
+                return {"found": True, "businesses": data.get('results', [])[:5]}
+    except asyncio.TimeoutError:
+        logger.warning(f"LeadFinder timeout for {niche}")
+    except Exception as e:
+        logger.error(f"LeadFinder error: {e}")
+    return None
+
+# ----- 3. PTINSEARCHER -----
+async def ptinsearcher_lookup(domain: str) -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ptinsearcher", "-u", domain, "--extract", "E", "--extract", "P", "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         if stdout:
             data = json.loads(stdout)
             return {
-                "country": data.get('country', '—'),
-                "carrier": data.get('carrier', '—'),
-                "line_type": data.get('line_type', '—')
+                "emails": data.get('emails', []),
+                "phones": data.get('phones', []),
+                "ips": data.get('ips', []),
+                "subdomains": data.get('subdomains', [])
             }
     except Exception as e:
-        logger.error(f"PhoneInfoga error: {e}")
+        logger.error(f"PTINSEARCHER error: {e}")
     return None
 
-async def sherlock_lookup(username: str) -> dict:
+# ----- 4. ainfo (контакты с сайтов) -----
+async def ainfo_contacts_lookup(domain: str) -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "sherlock", username,
+            "ainfo", "run", domain, "--extract", "contacts", "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await proc.communicate()
-        if stdout:
-            return {"result": stdout.decode()[:500]}
-    except Exception as e:
-        logger.error(f"Sherlock error: {e}")
-    return None
-
-async def holehe_lookup(email: str) -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "holehe", email, "--only-used",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        if stdout:
-            return {"result": stdout.decode()[:500]}
-    except Exception as e:
-        logger.error(f"Holehe error: {e}")
-    return None
-
-async def theharvester_lookup(domain: str) -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "theHarvester", "-d", domain, "-l", "10",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        if stdout:
-            return {"result": stdout.decode()[:500]}
-    except Exception as e:
-        logger.error(f"TheHarvester error: {e}")
-    return None
-
-async def maigret_lookup(username: str) -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "maigret", username, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         if stdout:
             data = json.loads(stdout)
             return {
-                "sites_found": len(data.get('sites', {})),
-                "result": json.dumps(data, ensure_ascii=False)[:300]
+                "emails": data.get('contacts', {}).get('emails', []),
+                "phones": data.get('contacts', {}).get('phones', []),
+                "addresses": data.get('contacts', {}).get('addresses', [])
             }
     except Exception as e:
-        logger.error(f"Maigret error: {e}")
+        logger.error(f"Ainfo error: {e}")
     return None
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
@@ -402,7 +456,7 @@ async def global_lookup(query: str) -> dict:
     total = 0
     
     if qtype == "phone":
-        # API
+        # Существующие API
         veriphone = await veriphone_lookup(query)
         if veriphone:
             result["sources"]["veriphone"] = veriphone
@@ -438,33 +492,26 @@ async def global_lookup(query: str) -> dict:
             result["sources"]["hudsonrock"] = hudson
             total += 1
         
-        # CLI
-        phoneinfoga = await phoneinfoga_lookup(query)
-        if phoneinfoga:
-            result["sources"]["phoneinfoga"] = phoneinfoga
-            total += 1
-    
-    if qtype == "email":
-        holehe = await holehe_lookup(query)
-        if holehe:
-            result["sources"]["holehe"] = holehe
-            total += 1
-    
-    if qtype == "username":
-        sherlock = await sherlock_lookup(query)
-        if sherlock:
-            result["sources"]["sherlock"] = sherlock
+        # Новые утилиты
+        leadfinder = await leadfinder_lookup(query)
+        if leadfinder:
+            result["sources"]["leadfinder"] = leadfinder
             total += 1
         
-        maigret = await maigret_lookup(query)
-        if maigret:
-            result["sources"]["maigret"] = maigret
+        receivesms = await receivesms_lookup()
+        if receivesms:
+            result["sources"]["receivesms"] = receivesms
             total += 1
     
     if qtype == "domain":
-        theharvester = await theharvester_lookup(query)
-        if theharvester:
-            result["sources"]["theharvester"] = theharvester
+        ptinsearcher = await ptinsearcher_lookup(query)
+        if ptinsearcher:
+            result["sources"]["ptinsearcher"] = ptinsearcher
+            total += 1
+        
+        ainfo = await ainfo_contacts_lookup(query)
+        if ainfo:
+            result["sources"]["ainfo"] = ainfo
             total += 1
     
     result["total_results"] = total
@@ -914,7 +961,7 @@ def callback_handler(call):
             "• Никнейм: username\n"
             "• IP-адрес: 8.8.8.8\n"
             "• Любой текст\n\n"
-            "ℹ️ Бот использует 15+ OSINT-источников.",
+            "ℹ️ Бот использует 11+ OSINT-источников.",
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",
@@ -1002,6 +1049,12 @@ def handle_text(message):
             "created": datetime.now().timestamp()
         }
         
+        # Удаляем старые отчёты
+        current_time = datetime.now().timestamp()
+        for rid in list(reports.keys()):
+            if current_time - reports[rid]["created"] > 3600:
+                del reports[rid]
+        
         filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(html)
@@ -1030,6 +1083,9 @@ def handle_text(message):
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
+    # Устанавливаем инструменты при первом запуске
+    setup_tools()
+    
     init_db()
     logger.info("🚀 OTOB бот запускается...")
     bot.remove_webhook()

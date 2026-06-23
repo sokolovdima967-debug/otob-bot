@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 import telebot
 from telebot import types
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from aiohttp_socks import SocksConnector
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
@@ -32,13 +33,123 @@ ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
 HUNTER_KEY = os.environ.get("HUNTER_KEY")
 
+# ===== ПРОКСИ (из переменных окружения) =====
+PROXY_LIST = os.environ.get("PROXY_LIST", "").split(",")
+if PROXY_LIST and PROXY_LIST[0]:
+    logger.info(f"✅ Загружено {len(PROXY_LIST)} прокси из переменных")
+else:
+    PROXY_LIST = [
+        "socks5://user:pass@proxy1.webshare.io:1080",
+        "socks5://user:pass@proxy2.webshare.io:1080",
+        "socks5://user:pass@proxy3.webshare.io:1080",
+    ]
+    logger.warning("⚠️ Используются примеры прокси! Замените на свои.")
+
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== БАЗА DАННЫХ ====================
+# ==================== ПРОКСИ-МОДУЛЬ ====================
+
+class ProxyManager:
+    def __init__(self, proxies: list):
+        self.proxies = proxies
+        self.current_index = 0
+        self.failed_proxies = set()
+        self.lock = asyncio.Lock()
+    
+    def get_next_proxy(self) -> str:
+        """Возвращает следующий прокси (round-robin)"""
+        if not self.proxies:
+            return None
+        # Ищем рабочий прокси, пропуская упавшие
+        for _ in range(len(self.proxies)):
+            proxy = self.proxies[self.current_index % len(self.proxies)]
+            self.current_index += 1
+            if proxy not in self.failed_proxies:
+                return proxy
+        # Если все упали — сбрасываем
+        self.failed_proxies.clear()
+        return self.proxies[0]
+    
+    def mark_failed(self, proxy: str):
+        """Помечает прокси как упавший"""
+        self.failed_proxies.add(proxy)
+        logger.warning(f"⚠️ Прокси {proxy[:20]}... помечен как нерабочий")
+    
+    async def request(self, url: str, method: str = "GET", headers: dict = None, 
+                      data: dict = None, timeout: int = 30, max_retries: int = 3) -> dict:
+        """Выполняет запрос через прокси с автоматическим переключением"""
+        headers = headers or {}
+        headers.update({
+            "User-Agent": random.choice([
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+            ]),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        })
+        
+        last_error = None
+        
+        for attempt in range(max_retries):
+            proxy = self.get_next_proxy()
+            if not proxy:
+                break
+            
+            try:
+                # Проверяем тип прокси (socks5://, socks4://, http://)
+                if proxy.startswith("socks5://") or proxy.startswith("socks4://"):
+                    connector = SocksConnector.from_url(proxy)
+                else:
+                    connector = aiohttp.TCPConnector()
+                
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        json=data if method == "POST" else None,
+                        params=data if method == "GET" else None,
+                        timeout=aiohttp.ClientTimeout(total=timeout)
+                    ) as resp:
+                        content_type = resp.headers.get("content-type", "")
+                        if "application/json" in content_type:
+                            result = await resp.json()
+                        else:
+                            result = {"text": await resp.text()}
+                        
+                        if resp.status == 200:
+                            return {"success": True, "data": result, "status": resp.status}
+                        elif resp.status in [403, 429]:
+                            logger.warning(f"⚠️ Блокировка (403/429) на {proxy[:20]}...")
+                            self.mark_failed(proxy)
+                            continue
+                        else:
+                            logger.warning(f"⚠️ HTTP {resp.status} на {proxy[:20]}...")
+                            continue
+                            
+            except (aiohttp.ClientConnectorError, aiohttp.ClientProxyConnectionError) as e:
+                logger.warning(f"⚠️ Ошибка соединения {proxy[:20]}...: {e}")
+                self.mark_failed(proxy)
+                last_error = e
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Таймаут {proxy[:20]}...")
+                self.mark_failed(proxy)
+                last_error = "Timeout"
+            except Exception as e:
+                logger.error(f"❌ Ошибка {proxy[:20]}...: {e}")
+                last_error = e
+        
+        return {"success": False, "error": str(last_error)}
+
+# ==================== ИНИЦИАЛИЗАЦИЯ ПРОКСИ-МЕНЕДЖЕРА ====================
+proxy_manager = ProxyManager(PROXY_LIST)
+
+# ==================== БАЗА ДАННЫХ ====================
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -169,7 +280,16 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"Not found")
         except Exception as e:
-            logger.error(f"HTTP error: {e}")
+            logger.error(f"HTTP GET error: {e}")
+    
+    def do_HEAD(self):
+        if self.path == '/' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def run_http_server():
     try:
@@ -195,18 +315,6 @@ def generate_otob_title(query: str, qtype: str) -> str:
     ]
     return random.choice(templates)
 
-def safe_request(func):
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except asyncio.TimeoutError:
-            logger.warning(f"⏰ Таймаут в {func.__name__}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка в {func.__name__}: {e}")
-            return None
-    return wrapper
-
 # ==================== ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ====================
 def detect_query_type(query: str) -> str:
     query = query.strip()
@@ -224,430 +332,233 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== API ФУНКЦИИ (таймаут 30 секунд) ====================
+# ==================== API ФУНКЦИИ С ПРОКСИ ====================
 
-@safe_request
+async def api_request(url: str, params: dict = None, timeout: int = 30) -> dict:
+    """Универсальный API-запрос через прокси"""
+    result = await proxy_manager.request(url, method="GET", data=params, timeout=timeout)
+    if result.get("success"):
+        return result.get("data", {})
+    return None
+
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('valid'):
-                    return {
-                        "country": data.get('country_name', '—'),
-                        "location": data.get('location', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "line_type": data.get('line_type', '—')
-                    }
+    data = await api_request(url)
+    if data and data.get('valid'):
+        return {
+            "country": data.get('country_name', '—'),
+            "location": data.get('location', '—'),
+            "carrier": data.get('carrier', '—'),
+            "line_type": data.get('line_type', '—')
+        }
     return None
 
-@safe_request
 async def veriphone_lookup(phone: str) -> dict:
     if not VERIPHONE_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.veriphone.io/v2/verify?phone=%2B{clean}&key={VERIPHONE_KEY}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('phone_valid'):
-                    return {
-                        "country": data.get('country', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "type": data.get('phone_type', '—')
-                    }
+    data = await api_request(url)
+    if data and data.get('phone_valid'):
+        return {
+            "country": data.get('country', '—'),
+            "carrier": data.get('carrier', '—'),
+            "type": data.get('phone_type', '—')
+        }
     return None
 
-@safe_request
 async def abstractapi_lookup(phone: str) -> dict:
     if not ABSTRACT_API_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('valid'):
-                    return {
-                        "country": data.get('country', {}).get('name', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "location": data.get('location', '—'),
-                        "line_type": data.get('line_type', '—')
-                    }
+    data = await api_request(url)
+    if data and data.get('valid'):
+        return {
+            "country": data.get('country', {}).get('name', '—'),
+            "carrier": data.get('carrier', '—'),
+            "location": data.get('location', '—'),
+            "line_type": data.get('line_type', '—')
+        }
     return None
 
-@safe_request
 async def bigdatacloud_lookup(phone: str) -> dict:
     if not BIGDATACLOUD_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.bigdatacloud.net/data/phone-validate?phoneNumber=%2B{clean}&key={BIGDATACLOUD_KEY}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('valid'):
-                    return {
-                        "country": data.get('countryName', '—'),
-                        "country_code": data.get('countryCode', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "location": data.get('location', '—'),
-                        "timezone": data.get('timeZone', '—')
-                    }
+    data = await api_request(url)
+    if data and data.get('valid'):
+        return {
+            "country": data.get('countryName', '—'),
+            "country_code": data.get('countryCode', '—'),
+            "carrier": data.get('carrier', '—'),
+            "location": data.get('location', '—'),
+            "timezone": data.get('timeZone', '—')
+        }
     return None
 
-@safe_request
 async def omkarcloud_lookup(phone: str) -> dict:
     if not OMKAR_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://carrier-lookup-api.omkar.cloud/lookup?phone=%2B{clean}"
-    headers = {"API-Key": OMKAR_KEY}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('is_valid_number'):
-                    return {
-                        "carrier": data.get('carrier', '—'),
-                        "line_type": data.get('line_type', '—'),
-                        "country_code": data.get('country_code', '—')
-                    }
+    data = await api_request(url, params={"phone": f"+{clean}"})
+    if data and data.get('is_valid_number'):
+        return {
+            "carrier": data.get('carrier', '—'),
+            "line_type": data.get('line_type', '—'),
+            "country_code": data.get('country_code', '—')
+        }
     return None
 
-@safe_request
 async def htmlweb_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data:
-                    return {
-                        "country": data.get('country', '—'),
-                        "operator": data.get('operator', '—'),
-                        "region": data.get('region', '—'),
-                        "timezone": data.get('timezone', '—')
-                    }
+    data = await api_request(url)
+    if data:
+        return {
+            "country": data.get('country', '—'),
+            "operator": data.get('operator', '—'),
+            "region": data.get('region', '—'),
+            "timezone": data.get('timezone', '—')
+        }
     return None
 
-@safe_request
 async def hlr_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://smsc.ru/testhlr.php?phone={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.text()
-                return {"status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
+    data = await api_request(url)
+    if data and isinstance(data, dict) and data.get('text'):
+        text = data.get('text', '')
+        return {"status": "✅ Активен" if 'OK' in text else "❌ Не активен"}
     return None
 
-@safe_request
 async def hudsonrock_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('total_results', 0) > 0:
-                    return {
-                        "found": True,
-                        "total": data.get('total_results', 0),
-                        "breaches": data.get('results', [])[:5]
-                    }
+    data = await api_request(url)
+    if data and data.get('total_results', 0) > 0:
+        return {
+            "found": True,
+            "total": data.get('total_results', 0),
+            "breaches": data.get('results', [])[:5]
+        }
     return None
 
-@safe_request
 async def hunter_lookup(email: str) -> dict:
     if not HUNTER_KEY:
         return None
     url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_KEY}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                result = data.get('data', {})
-                return {
-                    "status": result.get('status', '—'),
-                    "score": result.get('score', 0),
-                    "first_name": result.get('first_name', '—'),
-                    "last_name": result.get('last_name', '—'),
-                    "company": result.get('company', '—')
-                }
+    data = await api_request(url)
+    if data:
+        result = data.get('data', {})
+        return {
+            "status": result.get('status', '—'),
+            "score": result.get('score', 0),
+            "first_name": result.get('first_name', '—'),
+            "last_name": result.get('last_name', '—'),
+            "company": result.get('company', '—')
+        }
     return None
 
-@safe_request
 async def emailrep_lookup(email: str) -> dict:
     url = f"https://emailrep.io/{email}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "reputation": data.get('reputation', '—'),
-                    "suspicious": data.get('suspicious', False),
-                    "references": data.get('references', 0)
-                }
+    data = await api_request(url)
+    if data:
+        return {
+            "reputation": data.get('reputation', '—'),
+            "suspicious": data.get('suspicious', False),
+            "references": data.get('references', 0)
+        }
     return None
 
-@safe_request
 async def hibp_lookup(email: str) -> list:
     url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return [b.get('Name') for b in data]
+    data = await api_request(url)
+    if data and isinstance(data, list):
+        return [b.get('Name') for b in data]
     return []
 
-@safe_request
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "country": data.get('country', '—'),
-                    "city": data.get('city', '—'),
-                    "region": data.get('region', '—'),
-                    "org": data.get('org', '—')
-                }
+    data = await api_request(url)
+    if data:
+        return {
+            "country": data.get('country', '—'),
+            "city": data.get('city', '—'),
+            "region": data.get('region', '—'),
+            "org": data.get('org', '—')
+        }
     return None
 
-@safe_request
 async def crtsh_lookup(domain: str) -> list:
     url = f"https://crt.sh/?q={domain}&output=json"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data:
-                    return [{"domain": item.get('name_value', '—')} for item in data[:5]]
+    data = await api_request(url)
+    if data and isinstance(data, list):
+        return [{"domain": item.get('name_value', '—')} for item in data[:5]]
     return []
 
-@safe_request
 async def whois_lookup(domain: str) -> dict:
     url = f"https://api.whois.vu/?q={domain}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "registrar": data.get('registrar', '—'),
-                    "creation_date": data.get('creation_date', '—'),
-                    "expiration_date": data.get('expiration_date', '—')
-                }
+    data = await api_request(url)
+    if data:
+        return {
+            "registrar": data.get('registrar', '—'),
+            "creation_date": data.get('creation_date', '—'),
+            "expiration_date": data.get('expiration_date', '—')
+        }
     return None
 
-@safe_request
 async def ip_api_lookup(ip: str) -> dict:
-    """ip-api.com — бесплатно, без ключа, 45 запросов/мин"""
     url = f"http://ip-api.com/json/{ip}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('status') == 'success':
-                    return {
-                        "country": data.get('country', '—'),
-                        "city": data.get('city', '—'),
-                        "region": data.get('regionName', '—'),
-                        "isp": data.get('isp', '—'),
-                        "asn": data.get('as', '—')
-                    }
+    data = await api_request(url)
+    if data and data.get('status') == 'success':
+        return {
+            "country": data.get('country', '—'),
+            "city": data.get('city', '—'),
+            "region": data.get('regionName', '—'),
+            "isp": data.get('isp', '—'),
+            "asn": data.get('as', '—')
+        }
     return None
 
-@safe_request
 async def github_username_lookup(username: str) -> dict:
-    """GitHub API — 60 запросов/час без ключа"""
     url = f"https://api.github.com/users/{username}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "name": data.get('name', '—'),
-                    "bio": data.get('bio', '—'),
-                    "company": data.get('company', '—'),
-                    "location": data.get('location', '—'),
-                    "public_repos": data.get('public_repos', 0),
-                    "followers": data.get('followers', 0),
-                    "following": data.get('following', 0)
-                }
+    data = await api_request(url)
+    if data:
+        return {
+            "name": data.get('name', '—'),
+            "bio": data.get('bio', '—'),
+            "company": data.get('company', '—'),
+            "location": data.get('location', '—'),
+            "public_repos": data.get('public_repos', 0),
+            "followers": data.get('followers', 0),
+            "following": data.get('following', 0)
+        }
     return None
 
-@safe_request
 async def telegram_username_lookup(username: str) -> dict:
-    """Telegram API — проверка существования username"""
-    try:
-        url = f"https://t.me/{username}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=30) as resp:
-                if resp.status == 200:
-                    return {"exists": True, "url": f"https://t.me/{username}"}
-                else:
-                    return {"exists": False}
-    except:
-        pass
+    url = f"https://t.me/{username}"
+    result = await proxy_manager.request(url)
+    if result.get("success"):
+        return {"exists": True, "url": f"https://t.me/{username}"}
     return {"exists": False}
 
-@safe_request
 async def zippopotam_lookup(postal_code: str, country: str = "RU") -> dict:
-    """zippopotam.us — бесплатно, без ключа"""
     url = f"https://api.zippopotam.us/{country}/{postal_code}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "country": data.get('country', '—'),
-                    "places": data.get('places', [])[:3]
-                }
+    data = await api_request(url)
+    if data:
+        return {
+            "country": data.get('country', '—'),
+            "places": data.get('places', [])[:3]
+        }
     return None
 
-# ==================== НОВЫЕ ФУНКЦИИ ====================
-
-async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if stdout:
-            data = json.loads(stdout)
-            if data.get('results'):
-                return {
-                    "found": True,
-                    "total": len(data['results']),
-                    "businesses": data['results'][:5],
-                    "source": "LeadFinder"
-                }
-    except:
-        pass
-    return None
-
-async def telegram_bot_parser(phone: str) -> dict:
-    results = {}
-    bots = {
-        "sherlock": "https://sherlock-tg.vercel.app/api/search?q={phone}",
-        "osant": "https://osant-bot.vercel.app/api/phone?number={phone}",
-    }
-    for name, url_template in bots.items():
-        try:
-            url = url_template.format(phone=phone)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        results[name] = data
-        except:
-            pass
-    if results:
-        return {"found": True, "results": results, "source": "TelegramBots"}
-    return None
-
-async def freephonenum_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.freephonenum.com/search?q={clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .card, .phone-info')[:3]:
-                        title = item.select_one('.title, .name')
-                        text = item.select_one('.description, .text')
-                        if title:
-                            results.append({
-                                "title": title.get_text(strip=True),
-                                "text": text.get_text(strip=True) if text else "—"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-async def phonesearch_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.phonesearch.com/phone/{clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .person, .card')[:3]:
-                        name = item.select_one('.name, .title')
-                        address = item.select_one('.address, .location')
-                        if name:
-                            results.append({
-                                "title": name.get_text(strip=True),
-                                "extra": address.get_text(strip=True) if address else "—"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-async def callerid_parse(phone: str) -> list:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://www.callerid.com/phone/{clean}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    results = []
-                    for item in soup.select('.result, .card, .info')[:3]:
-                        name = item.select_one('.name, .title')
-                        spam = item.select_one('.spam, .warning')
-                        if name:
-                            results.append({
-                                "title": name.get_text(strip=True),
-                                "extra": spam.get_text(strip=True) if spam else "Не спам"
-                            })
-                    return results
-    except:
-        pass
-    return []
-
-async def numberlookup_api(phone: str) -> dict:
-    try:
-        clean = re.sub(r'\D', '', phone)
-        url = f"https://numberlookupapi.com/api?number={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('valid'):
-                        return {
-                            "country": data.get('country', '—'),
-                            "carrier": data.get('carrier', '—'),
-                            "line_type": data.get('line_type', '—')
-                        }
-    except:
-        pass
-    return None
-
-# ==================== ПАРСЕРЫ ====================
+# ==================== ПАРСЕРЫ С ПРОКСИ ====================
 
 async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     headers = {
@@ -660,27 +571,28 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     }
     results = []
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
-                    for item in items[:max_results]:
-                        title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
-                        link_elem = item.select_one(selectors.get("link", "a"))
-                        text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
-                        extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
-                        result = {
-                            "title": title_elem.get_text(strip=True) if title_elem else "—",
-                            "link": link_elem.get('href') if link_elem else None,
-                            "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
-                            "extra": extra_elem.get_text(strip=True) if extra_elem else None
-                        }
-                        if result["link"] and result["link"].startswith('/'):
-                            result["link"] = f"https://{url.split('/')[2]}{result['link']}"
-                        if result["title"] != "—" or result["text"] != "—":
-                            results.append(result)
+        response = await proxy_manager.request(url, headers=headers, timeout=30)
+        if response.get("success") and response.get("data"):
+            html = response.get("data")
+            if isinstance(html, dict) and html.get("text"):
+                html = html["text"]
+            soup = BeautifulSoup(html, 'html.parser')
+            items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
+            for item in items[:max_results]:
+                title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
+                link_elem = item.select_one(selectors.get("link", "a"))
+                text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
+                extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
+                result = {
+                    "title": title_elem.get_text(strip=True) if title_elem else "—",
+                    "link": link_elem.get('href') if link_elem else None,
+                    "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
+                    "extra": extra_elem.get_text(strip=True) if extra_elem else None
+                }
+                if result["link"] and result["link"].startswith('/'):
+                    result["link"] = f"https://{url.split('/')[2]}{result['link']}"
+                if result["title"] != "—" or result["text"] != "—":
+                    results.append(result)
     except Exception as e:
         logger.error(f"Parse error for {url}: {e}")
     return results
@@ -750,19 +662,89 @@ async def wikipedia_lookup(query: str) -> list:
 async def fssp_lookup(fio: str) -> dict:
     try:
         params = {"name": fio}
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", params=params, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("response", {}).get("count"):
-                        return {
-                            "found": True,
-                            "count": data["response"]["count"],
-                            "debts": data["response"].get("items", [])[:3]
-                        }
+        result = await proxy_manager.request("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", data=params, timeout=30)
+        if result.get("success"):
+            data = result.get("data", {})
+            if data.get("response", {}).get("count"):
+                return {
+                    "found": True,
+                    "count": data["response"]["count"],
+                    "debts": data["response"].get("items", [])[:3]
+                }
     except:
         pass
     return {"found": False}
+
+# ==================== НОВЫЕ ФУНКЦИИ ====================
+
+async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if stdout:
+            data = json.loads(stdout)
+            if data.get('results'):
+                return {
+                    "found": True,
+                    "total": len(data['results']),
+                    "businesses": data['results'][:5],
+                    "source": "LeadFinder"
+                }
+    except:
+        pass
+    return None
+
+async def freephonenum_parse(phone: str) -> list:
+    clean = re.sub(r'\D', '', phone)
+    url = f"https://www.freephonenum.com/search?q={clean}"
+    selectors = {"result": ".result, .card, .phone-info", "title": ".title, .name", "text": ".description, .text"}
+    return await parse_site(url, selectors, 3)
+
+async def phonesearch_parse(phone: str) -> list:
+    clean = re.sub(r'\D', '', phone)
+    url = f"https://www.phonesearch.com/phone/{clean}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .title", "extra": ".address, .location"}
+    return await parse_site(url, selectors, 3)
+
+async def callerid_parse(phone: str) -> list:
+    clean = re.sub(r'\D', '', phone)
+    url = f"https://www.callerid.com/phone/{clean}"
+    selectors = {"result": ".result, .card, .info", "title": ".name, .title", "extra": ".spam, .warning"}
+    return await parse_site(url, selectors, 3)
+
+async def numberlookup_api(phone: str) -> dict:
+    clean = re.sub(r'\D', '', phone)
+    url = f"https://numberlookupapi.com/api?number={clean}"
+    data = await api_request(url)
+    if data and data.get('valid'):
+        return {
+            "country": data.get('country', '—'),
+            "carrier": data.get('carrier', '—'),
+            "line_type": data.get('line_type', '—')
+        }
+    return None
+
+async def telegram_bot_parser(phone: str) -> dict:
+    results = {}
+    bots = {
+        "sherlock": "https://sherlock-tg.vercel.app/api/search?q={phone}",
+        "osant": "https://osant-bot.vercel.app/api/phone?number={phone}",
+    }
+    for name, url_template in bots.items():
+        try:
+            url = url_template.format(phone=phone)
+            data = await api_request(url)
+            if data:
+                results[name] = data
+        except:
+            pass
+    if results:
+        return {"found": True, "results": results, "source": "TelegramBots"}
+    return None
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 

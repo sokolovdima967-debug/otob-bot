@@ -3,4 +3,3 @@ aiohttp==3.9.1
 beautifulsoup4==4.12.2
 phonenumbers==8.13.29
 requests==2.31.0
-receivesms==0.1.0

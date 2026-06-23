@@ -18,17 +18,18 @@ import telebot
 from telebot import types
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ========== НАСТРОЙКИ ==========
+# ========== НАСТРОЙКИ (из переменных окружения) ==========
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 DB_PATH = os.path.join("/tmp", "otob_bot.db")
 
-# ===== КЛЮЧИ API =====
+# ===== КЛЮЧИ API (из переменных окружения) =====
 VERIPHONE_KEY = os.environ.get("VERIPHONE_KEY")
 OMKAR_KEY = os.environ.get("OMKAR_KEY")
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
 ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
@@ -46,20 +47,7 @@ def init_db():
             username TEXT,
             searches_today INTEGER DEFAULT 0,
             searches_extra INTEGER DEFAULT 0,
-            mirror_created INTEGER DEFAULT 0,
-            mirror_refs INTEGER DEFAULT 0,
             last_reset DATE DEFAULT CURRENT_DATE
-        )
-    ''')
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS mirrors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            mirror_token TEXT UNIQUE,
-            bot_username TEXT,
-            bot_name TEXT,
-            created_at DATE DEFAULT CURRENT_DATE,
-            is_active INTEGER DEFAULT 1
         )
     ''')
     conn.commit()
@@ -69,23 +57,23 @@ def init_db():
 def get_user(user_id: int, username: str = None):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT user_id, username, searches_today, searches_extra, mirror_created, mirror_refs, last_reset FROM users WHERE user_id = ?", (user_id,))
+    cur.execute("SELECT user_id, username, searches_today, searches_extra, last_reset FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
     if row:
-        result = {"user_id": row[0], "username": row[1], "searches_today": row[2], "searches_extra": row[3], "mirror_created": row[4], "mirror_refs": row[5], "last_reset": row[6]}
+        result = {"user_id": row[0], "username": row[1], "searches_today": row[2], "searches_extra": row[3], "last_reset": row[4]}
     else:
-        cur.execute("INSERT INTO users (user_id, username, searches_today, searches_extra, mirror_created, mirror_refs, last_reset) VALUES (?, ?, 0, 0, 0, 0, ?)",
+        cur.execute("INSERT INTO users (user_id, username, searches_today, searches_extra, last_reset) VALUES (?, ?, 0, 0, ?)",
                     (user_id, username, datetime.now().date().isoformat()))
         conn.commit()
-        result = {"user_id": user_id, "username": username, "searches_today": 0, "searches_extra": 0, "mirror_created": 0, "mirror_refs": 0, "last_reset": datetime.now().date().isoformat()}
+        result = {"user_id": user_id, "username": username, "searches_today": 0, "searches_extra": 0, "last_reset": datetime.now().date().isoformat()}
     conn.close()
     return result
 
 def update_user(user_id: int, data: dict):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE users SET username = ?, searches_today = ?, searches_extra = ?, mirror_created = ?, mirror_refs = ?, last_reset = ? WHERE user_id = ?",
-                (data.get("username"), data.get("searches_today"), data.get("searches_extra"), data.get("mirror_created"), data.get("mirror_refs"), data.get("last_reset"), user_id))
+    cur.execute("UPDATE users SET username = ?, searches_today = ?, searches_extra = ?, last_reset = ? WHERE user_id = ?",
+                (data.get("username"), data.get("searches_today"), data.get("searches_extra"), data.get("last_reset"), user_id))
     conn.commit()
     conn.close()
 
@@ -97,34 +85,22 @@ def reset_daily_searches():
     conn.commit()
     conn.close()
 
-def get_max_searches(user_id: int) -> int:
-    user = get_user(user_id)
-    return 3 + (2 if user.get("mirror_created", 0) > 0 else 0)
-
 def can_search(user_id: int) -> bool:
     if user_id == ADMIN_ID:
         return True
     reset_daily_searches()
     user = get_user(user_id)
-    max_searches = get_max_searches(user_id)
-    total_extra = user["searches_extra"] + user.get("mirror_refs", 0)
-    return user["searches_today"] < max_searches or total_extra > 0
+    return user["searches_today"] < 3 or user["searches_extra"] > 0
 
 def use_search(user_id: int) -> int:
     if user_id == ADMIN_ID:
         return 999
     reset_daily_searches()
     user = get_user(user_id)
-    max_searches = get_max_searches(user_id)
-    total_extra = user["searches_extra"] + user.get("mirror_refs", 0)
-    
-    if user["searches_today"] < max_searches:
+    if user["searches_today"] < 3:
         user["searches_today"] += 1
-    elif total_extra > 0:
-        if user["searches_extra"] > 0:
-            user["searches_extra"] -= 1
-        elif user.get("mirror_refs", 0) > 0:
-            user["mirror_refs"] -= 1
+    elif user["searches_extra"] > 0:
+        user["searches_extra"] -= 1
     else:
         return 0
     update_user(user_id, user)
@@ -134,35 +110,12 @@ def get_remaining(user_id: int) -> int:
     if user_id == ADMIN_ID:
         return 999
     user = get_user(user_id)
-    max_searches = get_max_searches(user_id)
-    total_extra = user["searches_extra"] + user.get("mirror_refs", 0)
-    return (max_searches - user["searches_today"]) + total_extra
-
-def get_all_mirror_tokens():
-    """Получает все активные токены зеркал из базы данных"""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT id, user_id, mirror_token, bot_username, bot_name FROM mirrors WHERE is_active = 1")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def save_mirror_token(user_id: int, mirror_token: str, bot_username: str = None, bot_name: str = None):
-    """Сохраняет токен зеркала в базу данных"""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO mirrors (user_id, mirror_token, bot_username, bot_name, created_at, is_active) VALUES (?, ?, ?, ?, ?, 1)",
-        (user_id, mirror_token, bot_username, bot_name, datetime.now().date().isoformat())
-    )
-    conn.commit()
-    conn.close()
-    logger.info(f"✅ Токен зеркала сохранён в БД: {mirror_token[:10]}...")
+    return (3 - user["searches_today"]) + user["searches_extra"]
 
 # ==================== ХРАНИЛИЩЕ ОТЧЁТОВ ====================
 reports = {}
 
-# ==================== ИНИЦИАЛИЗАЦИЯ ОСНОВНОГО БОТА ====================
+# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 bot.remove_webhook()
 
@@ -211,71 +164,6 @@ def run_http_server():
 
 run_http_server()
 
-# ==================== ФУНКЦИЯ ЗАПУСКА ЗЕРКАЛ ====================
-
-def run_mirror_bot(mirror_token: str, mirror_id: int):
-    """Запускает зеркального бота в отдельном потоке"""
-    try:
-        mirror_bot = telebot.TeleBot(mirror_token, parse_mode="Markdown")
-        
-        @mirror_bot.message_handler(commands=['start'])
-        def mirror_start(message):
-            mirror_bot.reply_to(
-                message,
-                f"🔍 *OTOB — Osint Tool Olimpov Bot (Зеркало)*\n\n"
-                f"👋 Это зеркало основного бота OTOB.\n"
-                f"📊 Используйте основного бота для поиска.\n\n"
-                f"🪞 Зеркало создано для получения бонусных поисков!\n"
-                f"🔗 Основной бот: @Osint_Tool_Olimpov_bot",
-                parse_mode="Markdown"
-            )
-            # Начисляем бонус владельцу зеркала
-            conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute("SELECT user_id FROM mirrors WHERE id = ?", (mirror_id,))
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                owner_id = row[0]
-                user = get_user(owner_id)
-                user["mirror_refs"] += 1
-                update_user(owner_id, user)
-                try:
-                    bot.send_message(owner_id, f"👤 Новый пользователь запустил ваше зеркало! +1 поиск!")
-                except:
-                    pass
-        
-        @mirror_bot.message_handler(func=lambda message: True)
-        def mirror_echo(message):
-            mirror_bot.reply_to(
-                message,
-                f"🔍 Это зеркало OTOB.\n\n"
-                f"📌 Для поиска используйте основного бота:\n"
-                f"@Osint_Tool_Olimpov_bot\n\n"
-                f"🪞 Спасибо, что используете OTOB!",
-                parse_mode="Markdown"
-            )
-        
-        mirror_bot.remove_webhook()
-        mirror_bot.infinity_polling(timeout=60, long_polling_timeout=30)
-        logger.info(f"✅ Зеркало {mirror_token[:10]}... запущено")
-    except Exception as e:
-        logger.error(f"❌ Ошибка запуска зеркала {mirror_token[:10]}...: {e}")
-
-def start_all_mirrors():
-    """Запускает все зеркала из базы данных"""
-    mirrors = get_all_mirror_tokens()
-    if not mirrors:
-        logger.info("ℹ️ Нет активных зеркал")
-        return
-    
-    logger.info(f"🚀 Запуск {len(mirrors)} зеркал...")
-    for mirror_id, user_id, mirror_token, bot_username, bot_name in mirrors:
-        thread = threading.Thread(target=run_mirror_bot, args=(mirror_token, mirror_id))
-        thread.daemon = True
-        thread.start()
-        logger.info(f"✅ Зеркало {mirror_token[:10]}... запущено (ID: {mirror_id})")
-
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def generate_otob_title(query: str, qtype: str) -> str:
@@ -300,9 +188,11 @@ def detect_query_type(query: str) -> str:
         return "username"
     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', query):
         return "ip"
+    if "." in query and len(query.split()) == 1:
+        return "domain"
     return "text"
 
-# ==================== API ФУНКЦИИ ====================
+# ==================== СУЩЕСТВУЮЩИЕ API ФУНКЦИИ ====================
 
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
@@ -462,7 +352,423 @@ async def hudsonrock_lookup(phone: str) -> dict:
         logger.error(f"HudsonRock error: {e}")
     return None
 
-# ==================== ПАРСИНГ САЙТОВ ====================
+async def emailrep_lookup(email: str) -> dict:
+    try:
+        url = f"https://emailrep.io/{email}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {
+                        "reputation": data.get('reputation', '—'),
+                        "suspicious": data.get('suspicious', False),
+                        "references": data.get('references', 0)
+                    }
+    except:
+        pass
+    return None
+
+async def hibp_lookup(email: str) -> list:
+    try:
+        url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return [b.get('Name') for b in data]
+    except:
+        pass
+    return []
+
+# ==================== НОВЫЕ ПАРСЕРЫ OSINT-САЙТОВ ====================
+
+# ----- 1. Парсинг Truecaller (публичный) -----
+async def truecaller_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.truecaller.com/search/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.profile, .card, .result-item')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "truecaller"})
+                    return results
+    except Exception as e:
+        logger.error(f"Truecaller parse error: {e}")
+    return []
+
+# ----- 2. Парсинг Spokeo (публичный) -----
+async def spokeo_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.spokeo.com/{clean}/search"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result-item, .person-item')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "spokeo"})
+                    return results
+    except Exception as e:
+        logger.error(f"Spokeo parse error: {e}")
+    return []
+
+# ----- 3. Парсинг Whitepages (публичный) -----
+async def whitepages_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.whitepages.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.card, .result-item')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "whitepages"})
+                    return results
+    except Exception as e:
+        logger.error(f"Whitepages parse error: {e}")
+    return []
+
+# ----- 4. Парсинг FastPeopleSearch -----
+async def fastpeoplesearch_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.fastpeoplesearch.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person-item')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "fastpeoplesearch"})
+                    return results
+    except Exception as e:
+        logger.error(f"FastPeopleSearch parse error: {e}")
+    return []
+
+# ----- 5. Парсинг ZabaSearch -----
+async def zabasearch_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.zabasearch.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "zabasearch"})
+                    return results
+    except Exception as e:
+        logger.error(f"ZabaSearch parse error: {e}")
+    return []
+
+# ----- 6. Парсинг Radaris -----
+async def radaris_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://radaris.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "radaris"})
+                    return results
+    except Exception as e:
+        logger.error(f"Radaris parse error: {e}")
+    return []
+
+# ----- 7. Парсинг Pipl (публичный) -----
+async def pipl_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://pipl.com/search/?q={clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "pipl"})
+                    return results
+    except Exception as e:
+        logger.error(f"Pipl parse error: {e}")
+    return []
+
+# ----- 8. Парсинг 411.com -----
+async def fouroneone_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://www.411.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "411.com"})
+                    return results
+    except Exception as e:
+        logger.error(f"411.com parse error: {e}")
+    return []
+
+# ----- 9. Парсинг usphonebook.com -----
+async def usphonebook_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://usphonebook.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "usphonebook"})
+                    return results
+    except Exception as e:
+        logger.error(f"Usphonebook parse error: {e}")
+    return []
+
+# ----- 10. Парсинг numberway.com -----
+async def numberway_parse(phone: str) -> list:
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://numberway.com/phone/{clean}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    results = []
+                    for item in soup.select('.result, .person')[:3]:
+                        name = item.select_one('.name, .title')
+                        if name:
+                            results.append({"title": name.get_text(strip=True), "source": "numberway"})
+                    return results
+    except Exception as e:
+        logger.error(f"Numberway parse error: {e}")
+    return []
+
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
+
+async def global_lookup(query: str) -> dict:
+    query = query.strip()
+    qtype = detect_query_type(query)
+    
+    result = {
+        "query": query,
+        "type": qtype,
+        "timestamp": datetime.now().isoformat(),
+        "sources": {},
+        "total_results": 0
+    }
+    
+    total = 0
+    
+    if qtype == "phone":
+        # Существующие API
+        numverify = await numverify_lookup(query)
+        if numverify:
+            result["sources"]["numverify"] = numverify
+            total += 1
+        
+        veriphone = await veriphone_lookup(query)
+        if veriphone:
+            result["sources"]["veriphone"] = veriphone
+            total += 1
+        
+        abstract = await abstractapi_lookup(query)
+        if abstract:
+            result["sources"]["abstractapi"] = abstract
+            total += 1
+        
+        bigdata = await bigdatacloud_lookup(query)
+        if bigdata:
+            result["sources"]["bigdatacloud"] = bigdata
+            total += 1
+        
+        omkar = await omkarcloud_lookup(query)
+        if omkar:
+            result["sources"]["omkarcloud"] = omkar
+            total += 1
+        
+        htmlweb = await htmlweb_lookup(query)
+        if htmlweb:
+            result["sources"]["htmlweb"] = htmlweb
+            total += 1
+        
+        hlr = await hlr_lookup(query)
+        if hlr:
+            result["sources"]["hlr"] = hlr
+            total += 1
+        
+        hudson = await hudsonrock_lookup(query)
+        if hudson:
+            result["sources"]["hudsonrock"] = hudson
+            total += 1
+        
+        # НОВЫЕ ПАРСЕРЫ (работают параллельно)
+        truecaller = await truecaller_parse(query)
+        if truecaller:
+            result["sources"]["truecaller"] = truecaller
+            total += len(truecaller)
+        
+        spokeo = await spokeo_parse(query)
+        if spokeo:
+            result["sources"]["spokeo"] = spokeo
+            total += len(spokeo)
+        
+        whitepages = await whitepages_parse(query)
+        if whitepages:
+            result["sources"]["whitepages"] = whitepages
+            total += len(whitepages)
+        
+        fastpeople = await fastpeoplesearch_parse(query)
+        if fastpeople:
+            result["sources"]["fastpeoplesearch"] = fastpeople
+            total += len(fastpeople)
+        
+        zabasearch = await zabasearch_parse(query)
+        if zabasearch:
+            result["sources"]["zabasearch"] = zabasearch
+            total += len(zabasearch)
+        
+        radaris = await radaris_parse(query)
+        if radaris:
+            result["sources"]["radaris"] = radaris
+            total += len(radaris)
+        
+        pipl = await pipl_parse(query)
+        if pipl:
+            result["sources"]["pipl"] = pipl
+            total += len(pipl)
+        
+        fouroneone = await fouroneone_parse(query)
+        if fouroneone:
+            result["sources"]["411.com"] = fouroneone
+            total += len(fouroneone)
+        
+        usphonebook = await usphonebook_parse(query)
+        if usphonebook:
+            result["sources"]["usphonebook"] = usphonebook
+            total += len(usphonebook)
+        
+        numberway = await numberway_parse(query)
+        if numberway:
+            result["sources"]["numberway"] = numberway
+            total += len(numberway)
+        
+        # Существующие парсеры (X-Ray, IDCrawl, и т.д.)
+        xray = await xray_lookup(query)
+        if xray:
+            result["sources"]["xray"] = xray
+            total += len(xray)
+        
+        idcrawl = await idcrawl_lookup(query)
+        if idcrawl:
+            result["sources"]["idcrawl"] = idcrawl
+            total += len(idcrawl)
+        
+        syncme = await syncme_lookup(query)
+        if syncme:
+            result["sources"]["syncme"] = syncme
+            total += len(syncme)
+        
+        whoseno = await whoseno_lookup(query)
+        if whoseno:
+            result["sources"]["whoseno"] = whoseno
+            total += len(whoseno)
+        
+        truepeople = await truepeoplesearch_lookup(query)
+        if truepeople:
+            result["sources"]["truepeoplesearch"] = truepeople
+            total += len(truepeople)
+        
+        fssp = await fssp_lookup(query)
+        if fssp.get("found"):
+            result["sources"]["fssp"] = fssp
+            total += 1
+        
+        ddg = await duckduckgo_search(query)
+        if ddg:
+            result["sources"]["duckduckgo"] = ddg
+            total += len(ddg)
+        
+        wiki = await wikipedia_lookup(query)
+        if wiki:
+            result["sources"]["wikipedia"] = wiki
+            total += len(wiki)
+    
+    if qtype == "email":
+        emailrep = await emailrep_lookup(query)
+        if emailrep:
+            result["sources"]["emailrep"] = emailrep
+            total += 1
+        
+        hibp = await hibp_lookup(query)
+        if hibp:
+            result["sources"]["hibp"] = hibp
+            total += len(hibp)
+    
+    if qtype == "domain":
+        # Парсинг доменов (новый)
+        crtsh = await crtsh_lookup(query)
+        if crtsh:
+            result["sources"]["crtsh"] = crtsh
+            total += 1
+        
+        whois = await whois_lookup(query)
+        if whois:
+            result["sources"]["whois"] = whois
+            total += 1
+    
+    result["total_results"] = total
+    return result
+
+# ==================== СУЩЕСТВУЮЩИЕ ПАРСЕРЫ ====================
 
 async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     headers = {
@@ -551,144 +857,36 @@ async def fssp_lookup(fio: str) -> dict:
         logger.error(f"FSSP error: {e}")
     return {"found": False}
 
-async def emailrep_lookup(email: str) -> dict:
+# ==================== НОВЫЕ ПАРСЕРЫ ДЛЯ ДОМЕНОВ ====================
+
+async def crtsh_lookup(domain: str) -> list:
     try:
-        url = f"https://emailrep.io/{email}"
+        url = f"https://crt.sh/?q={domain}&output=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data:
+                        return [{"domain": item.get('name_value', '—'), "source": "crt.sh"} for item in data[:5]]
+    except Exception as e:
+        logger.error(f"crt.sh error: {e}")
+    return []
+
+async def whois_lookup(domain: str) -> dict:
+    try:
+        url = f"https://api.whois.vu/?q={domain}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return {
-                        "reputation": data.get('reputation', '—'),
-                        "suspicious": data.get('suspicious', False),
-                        "references": data.get('references', 0)
+                        "registrar": data.get('registrar', '—'),
+                        "creation_date": data.get('creation_date', '—'),
+                        "expiration_date": data.get('expiration_date', '—')
                     }
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"WHOIS error: {e}")
     return None
-
-async def hibp_lookup(email: str) -> list:
-    try:
-        url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return [b.get('Name') for b in data]
-    except:
-        pass
-    return []
-
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
-
-async def global_lookup(query: str) -> dict:
-    query = query.strip()
-    qtype = detect_query_type(query)
-    
-    result = {
-        "query": query,
-        "type": qtype,
-        "timestamp": datetime.now().isoformat(),
-        "sources": {},
-        "total_results": 0
-    }
-    
-    total = 0
-    
-    if qtype == "phone":
-        numverify = await numverify_lookup(query)
-        if numverify:
-            result["sources"]["numverify"] = numverify
-            total += 1
-        
-        veriphone = await veriphone_lookup(query)
-        if veriphone:
-            result["sources"]["veriphone"] = veriphone
-            total += 1
-        
-        abstract = await abstractapi_lookup(query)
-        if abstract:
-            result["sources"]["abstractapi"] = abstract
-            total += 1
-        
-        bigdata = await bigdatacloud_lookup(query)
-        if bigdata:
-            result["sources"]["bigdatacloud"] = bigdata
-            total += 1
-        
-        omkar = await omkarcloud_lookup(query)
-        if omkar:
-            result["sources"]["omkarcloud"] = omkar
-            total += 1
-        
-        htmlweb = await htmlweb_lookup(query)
-        if htmlweb:
-            result["sources"]["htmlweb"] = htmlweb
-            total += 1
-        
-        hlr = await hlr_lookup(query)
-        if hlr:
-            result["sources"]["hlr"] = hlr
-            total += 1
-        
-        hudson = await hudsonrock_lookup(query)
-        if hudson:
-            result["sources"]["hudsonrock"] = hudson
-            total += 1
-        
-        xray = await xray_lookup(query)
-        if xray:
-            result["sources"]["xray"] = xray
-            total += len(xray)
-        
-        idcrawl = await idcrawl_lookup(query)
-        if idcrawl:
-            result["sources"]["idcrawl"] = idcrawl
-            total += len(idcrawl)
-        
-        syncme = await syncme_lookup(query)
-        if syncme:
-            result["sources"]["syncme"] = syncme
-            total += len(syncme)
-        
-        whoseno = await whoseno_lookup(query)
-        if whoseno:
-            result["sources"]["whoseno"] = whoseno
-            total += len(whoseno)
-        
-        truepeople = await truepeoplesearch_lookup(query)
-        if truepeople:
-            result["sources"]["truepeoplesearch"] = truepeople
-            total += len(truepeople)
-        
-        fssp = await fssp_lookup(query)
-        if fssp.get("found"):
-            result["sources"]["fssp"] = fssp
-            total += 1
-        
-        ddg = await duckduckgo_search(query)
-        if ddg:
-            result["sources"]["duckduckgo"] = ddg
-            total += len(ddg)
-        
-        wiki = await wikipedia_lookup(query)
-        if wiki:
-            result["sources"]["wikipedia"] = wiki
-            total += len(wiki)
-    
-    if qtype == "email":
-        emailrep = await emailrep_lookup(query)
-        if emailrep:
-            result["sources"]["emailrep"] = emailrep
-            total += 1
-        
-        hibp = await hibp_lookup(query)
-        if hibp:
-            result["sources"]["hibp"] = hibp
-            total += len(hibp)
-    
-    result["total_results"] = total
-    return result
 
 # ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
@@ -928,8 +1126,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 def main_menu_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("🔍 Функции", callback_data="menu_functions"),
-        types.InlineKeyboardButton("🪞 Зеркало", callback_data="menu_mirror")
+        types.InlineKeyboardButton("🔍 Функции", callback_data="menu_functions")
     )
     markup.add(
         types.InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"),
@@ -958,344 +1155,175 @@ def functions_menu_keyboard():
     )
     return markup
 
-# ==================== ЗЕРКАЛО ====================
+# ==================== ОБРАБОТЧИКИ КНОПОК ====================
 
-@bot.callback_query_handler(func=lambda call: call.data == "menu_mirror")
-def mirror_callback(call):
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
     bot.answer_callback_query(call.id)
-    user_id = call.from_user.id
-    user = get_user(user_id)
     
-    if user.get("mirror_created", 0) > 0:
+    if call.data == "menu_back":
         bot.edit_message_text(
-            f"🪞 *Зеркало уже создано!*\n\n"
-            f"✅ Вы уже создали копию бота.\n"
-            f"📊 Ваш лимит: **5 поисков в день**.\n\n"
-            f"👥 *Приглашено:* {user.get('mirror_refs', 0)} человек\n"
-            f"📊 *Бонусных поисков:* {user.get('mirror_refs', 0)}",
+            "🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
+            "👋 Привет! Я помогу тебе найти информацию в открытых источниках.\n\n"
+            "📌 *Выбери действие:*",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard()
+        )
+        return
+    
+    if call.data == "menu_functions":
+        bot.edit_message_text(
+            "🔍 *Выбери функцию:*\n\n"
+            "📌 *Основной поиск:*\n"
+            "• 🌐 Глобальный поиск — номер, email, ФИО, IP, домен\n\n"
+            "📌 *Быстрый поиск:*\n"
+            "• 📧 Email — проверка утечек\n"
+            "• 📱 Телефон — оператор, регион\n"
+            "• 👤 Username — поиск в соцсетях",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=functions_menu_keyboard()
+        )
+        return
+    
+    if call.data == "menu_profile":
+        user = call.from_user
+        user_data = get_user(user.id, user.username or "Unknown")
+        remaining = get_remaining(user.id)
+        text = (
+            "👤 *Твой профиль*\n\n"
+            f"🆔 ID: `{user.id}`\n"
+            f"👤 Username: @{user.username or 'нет'}\n"
+            f"📛 Имя: {user.first_name or '—'}\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Использовано: {user_data['searches_today']}/3\n"
+            f"📊 Бонусных: {user_data['searches_extra']}\n"
+            f"📊 Осталось: {remaining}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"⏰ Сброс: в 00:00 МСК\n"
+            f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
+        )
+        bot.edit_message_text(
+            text,
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",
             reply_markup=types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton("🔄 Обновить", callback_data="menu_mirror"),
                 types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
             )
         )
         return
     
-    text = (
-        "🪞 *Создание зеркала (копии) бота*\n\n"
-        "📌 *Как создать копию OTOB:*\n\n"
-        "1️⃣ Напишите @BotFather в Telegram\n"
-        "2️⃣ Отправьте команду `/newbot`\n"
-        "3️⃣ Придумайте имя для бота (любое)\n"
-        "4️⃣ Придумайте username, заканчивающийся на `bot`\n"
-        "5️⃣ Скопируйте полученный токен\n\n"
-        "6️⃣ Напишите сюда команду:\n"
-        "`/setmirror ТОКЕН_ВАШЕГО_БОТА`\n\n"
-        "✅ После этого вы получите **+2 поиска**!\n"
-        "📊 Ваш лимит станет **5 поисков в день**.\n\n"
-        "📌 *Бонус за приглашения:*\n"
-        "За каждого человека, который запустит вашего бота,\n"
-        "вы получите **+1 поиск**!"
-    )
-    
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("🔄 Я создал бота, дай токен!", callback_data="menu_mirror_token"),
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+    if call.data == "menu_balance":
+        user_id = call.from_user.id
+        remaining = get_remaining(user_id)
+        used = get_user(user_id)["searches_today"]
+        extra = get_user(user_id)["searches_extra"]
+        text = (
+            "📊 *Твой баланс*\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 Использовано: {used}/3\n"
+            f"📊 Бонусных: {extra}\n"
+            f"📊 Осталось: {remaining}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"⏰ Сброс: в 00:00 МСК\n"
+            f"👑 Админ: {'безлимитный' if user_id == ADMIN_ID else 'нет'}"
         )
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "menu_mirror_token")
-def mirror_token_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "🪞 *Введите токен вашего бота*\n\n"
-        "📌 Напишите команду в чат:\n"
-        "`/setmirror ТОКЕН_ВАШЕГО_БОТА`\n\n"
-        "Пример: `/setmirror 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`\n\n"
-        "✅ После активации вы получите +2 поиска!",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_mirror")
-        )
-    )
-
-@bot.message_handler(commands=['setmirror'])
-def set_mirror_command(message):
-    user_id = message.from_user.id
-    
-    user = get_user(user_id)
-    if user.get("mirror_created", 0) > 0:
-        bot.reply_to(message, "🪞 Вы уже создали зеркало!")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(
-            message,
-            "❌ *Укажите токен бота!*\n\n"
-            "Пример: `/setmirror 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`",
-            parse_mode="Markdown"
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+            )
         )
         return
     
-    mirror_token = args[1].strip()
+    if call.data == "menu_help":
+        bot.edit_message_text(
+            "❓ *Помощь*\n\n"
+            "📌 *Как пользоваться:*\n"
+            "• Отправь номер, email, никнейм, IP или домен\n"
+            "• Используй кнопки меню\n"
+            "• Глобальный поиск — всё в одном запросе\n\n"
+            "📊 *Лимит:* 3 поиска в день (сброс в 00:00 МСК)\n"
+            "👑 *Админ:* безлимитный доступ\n\n"
+            "🧑‍💻 *Канал разработчиков:* @lkblyad",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+            )
+        )
+        return
     
-    try:
-        test_bot = telebot.TeleBot(mirror_token)
-        bot_info = test_bot.get_me()
-        
-        # Сохраняем в базу данных
-        save_mirror_token(user_id, mirror_token, bot_info.username, bot_info.first_name)
-        
-        # Обновляем пользователя
-        user["mirror_created"] = 1
-        user["searches_extra"] += 2
-        update_user(user_id, user)
-        
-        bot.reply_to(
-            message,
-            f"🪞 *Зеркало успешно создано!*\n\n"
-            f"✅ Токен сохранён в базу данных!\n"
-            f"🤖 Бот: @{bot_info.username}\n"
-            f"📊 Вы получили **+2 поиска**!\n"
-            f"📊 Ваш лимит — **5 поисков в день**.\n\n"
-            f"🔗 Ваш бот: `https://t.me/{bot_info.username}`\n\n"
-            f"📌 *Как получить ещё +1 поиск?*\n"
-            f"• Отправьте ссылку на вашего бота друзьям\n"
-            f"• Каждый, кто запустит бота → +1 поиск\n\n"
-            f"🔄 Бот автоматически проверит все зеркала при перезапуске!",
-            parse_mode="Markdown"
+    if call.data == "global_search":
+        bot.edit_message_text(
+            "🌐 *Глобальный поиск*\n\n"
+            "Отправь запрос для поиска:\n"
+            "• Номер телефона: +79991234567\n"
+            "• ФИО: Иванов Иван Иванович\n"
+            "• Email: user@example.com\n"
+            "• Никнейм: username\n"
+            "• IP-адрес: 8.8.8.8\n"
+            "• Домен: example.com\n"
+            "• Любой текст\n\n"
+            "ℹ️ Бот использует 30+ OSINT-источников.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+            )
         )
-        
-        # Запускаем зеркало сразу
-        threading.Thread(target=run_mirror_bot, args=(mirror_token, 0)).start()
-        
-    except Exception as e:
-        logger.error(f"Mirror set error: {e}")
-        bot.reply_to(
-            message,
-            f"❌ *Ошибка при проверке токена!*\n\n"
-            f"Проверьте, что:\n"
-            f"1. Токен скопирован полностью\n"
-            f"2. Бот создан через @BotFather\n"
-            f"3. Токен действителен\n\n"
-            f"Ошибка: {str(e)[:100]}",
-            parse_mode="Markdown"
+        return
+    
+    if call.data == "email_search":
+        bot.edit_message_text(
+            "📧 *Проверка email*\n\n"
+            "Отправь email для проверки утечек.\n\n"
+            "Пример: user@example.com",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+            )
         )
-
-# ==================== ОБРАБОТЧИКИ КНОПОК ====================
-
-@bot.callback_query_handler(func=lambda call: call.data == "menu_back")
-def back_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
-        "👋 Привет! Я помогу тебе найти информацию в открытых источниках.\n\n"
-        "📌 *Выбери действие:*",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=main_menu_keyboard()
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "menu_functions")
-def functions_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "🔍 *Выбери функцию:*\n\n"
-        "📌 *Основной поиск:*\n"
-        "• 🌐 Глобальный поиск — номер, email, ФИО, IP\n\n"
-        "📌 *Быстрый поиск:*\n"
-        "• 📧 Email — проверка утечек\n"
-        "• 📱 Телефон — оператор, регион\n"
-        "• 👤 Username — поиск в соцсетях",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=functions_menu_keyboard()
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "menu_profile")
-def profile_callback(call):
-    bot.answer_callback_query(call.id)
-    user = call.from_user
-    user_data = get_user(user.id, user.username or "Unknown")
-    remaining = get_remaining(user.id)
-    max_searches = get_max_searches(user.id)
-    text = (
-        "👤 *Твой профиль*\n\n"
-        f"🆔 ID: `{user.id}`\n"
-        f"👤 Username: @{user.username or 'нет'}\n"
-        f"📛 Имя: {user.first_name or '—'}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *Лимит:* {max_searches} поисков в день\n"
-        f"🔍 Использовано: {user_data['searches_today']}/{max_searches}\n"
-        f"📊 Бонусных: {user_data['searches_extra']}\n"
-        f"👥 Приглашено: {user_data.get('mirror_refs', 0)}\n"
-        f"📊 Бонус от приглашений: {user_data.get('mirror_refs', 0)}\n"
-        f"🪞 Зеркало: {'✅ Создано' if user_data.get('mirror_created', 0) > 0 else '❌ Не создано'}\n"
-        f"📊 Осталось: {remaining}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ Сброс: в 00:00 МСК\n"
-        f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
-    )
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+        return
+    
+    if call.data == "phone_search":
+        bot.edit_message_text(
+            "📱 *Проверка телефона*\n\n"
+            "Отправь номер для проверки.\n\n"
+            "Пример: +79991234567 или 79991234567",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+            )
         )
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "menu_balance")
-def balance_callback(call):
-    bot.answer_callback_query(call.id)
-    user_id = call.from_user.id
-    remaining = get_remaining(user_id)
-    used = get_user(user_id)["searches_today"]
-    max_searches = get_max_searches(user_id)
-    extra = get_user(user_id)["searches_extra"]
-    refs = get_user(user_id).get("mirror_refs", 0)
-    text = (
-        "📊 *Твой баланс*\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *Лимит:* {max_searches} поисков в день\n"
-        f"🔍 Использовано: {used}/{max_searches}\n"
-        f"📊 Бонусных: {extra}\n"
-        f"👥 Бонус от приглашений: {refs}\n"
-        f"📊 Осталось: {remaining}\n"
-        f"🪞 Зеркало: {'✅' if get_user(user_id).get('mirror_created', 0) > 0 else '❌'}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ Сброс: в 00:00 МСК\n"
-        f"👑 Админ: {'безлимитный' if user_id == ADMIN_ID else 'нет'}"
-    )
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+        return
+    
+    if call.data == "username_search":
+        bot.edit_message_text(
+            "👤 *Поиск по username*\n\n"
+            "Отправь никнейм для поиска в соцсетях.\n\n"
+            "Пример: username",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+            )
         )
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "menu_help")
-def help_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "❓ *Помощь*\n\n"
-        "📌 *Как пользоваться:*\n"
-        "• Отправь номер, email, никнейм или IP\n"
-        "• Используй кнопки меню\n"
-        "• Глобальный поиск — всё в одном запросе\n\n"
-        "🪞 *Зеркало:*\n"
-        "• Создай копию бота через @BotFather\n"
-        "• Введи команду `/setmirror ТОКЕН`\n"
-        "• Получи +2 поиска\n\n"
-        "👥 *Приглашения:*\n"
-        "• Каждый приглашённый даёт +1 поиск\n\n"
-        "📊 *Лимит:* 3 + 2 (зеркало) + приглашения\n"
-        "👑 *Админ:* безлимитный доступ\n\n"
-        "🧑‍💻 *Канал разработчиков:* @lkblyad",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-        )
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "global_search")
-def global_search_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "🌐 *Глобальный поиск*\n\n"
-        "Отправь запрос для поиска:\n"
-        "• Номер телефона: +79991234567\n"
-        "• ФИО: Иванов Иван Иванович\n"
-        "• Email: user@example.com\n"
-        "• Никнейм: username\n"
-        "• IP-адрес: 8.8.8.8\n"
-        "• Любой текст\n\n"
-        "ℹ️ Бот использует 20+ OSINT-источников.",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-        )
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "email_search")
-def email_search_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "📧 *Проверка email*\n\n"
-        "Отправь email для проверки утечек.\n\n"
-        "Пример: user@example.com\n\n"
-        "🔍 Будут проверены:\n"
-        "• HaveIBeenPwned (утечки)\n"
-        "• EmailRep (репутация)\n"
-        "• XposedOrNot (утечки)",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-        )
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "phone_search")
-def phone_search_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "📱 *Проверка телефона*\n\n"
-        "Отправь номер для проверки.\n\n"
-        "Пример: +79991234567 или 79991234567\n\n"
-        "🔍 Будут проверены:\n"
-        "• Numverify (страна, оператор)\n"
-        "• Veriphone (страна, тип)\n"
-        "• AbstractAPI (локация)\n"
-        "• BigDataCloud (геолокация)\n"
-        "• HLR (активность)\n"
-        "• Hudson Rock (утечки)",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-        )
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "username_search")
-def username_search_callback(call):
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "👤 *Поиск по username*\n\n"
-        "Отправь никнейм для поиска в соцсетях.\n\n"
-        "Пример: username\n\n"
-        "🔍 Будут проверены:\n"
-        "• X-Ray.contact (соцсети)\n"
-        "• IDCrawl (соцсети)\n"
-        "• TruePeopleSearch (профили)",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-        )
-    )
+        return
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 
@@ -1303,14 +1331,12 @@ def username_search_callback(call):
 def start_command(message):
     user_id = message.from_user.id
     remaining = get_remaining(user_id)
-    max_searches = get_max_searches(user_id)
     
     bot.send_message(
         message.chat.id,
         f"🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
         f"👋 Привет, {message.from_user.first_name}!\n\n"
-        f"📊 *Твой лимит:* {max_searches} поисков в день\n"
-        f"🔍 *Осталось:* {remaining}\n\n"
+        f"📊 *Осталось поисков:* {remaining}/3\n\n"
         f"📌 *Выбери действие:*",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
@@ -1361,17 +1387,16 @@ def users_command(message):
         return
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT user_id, username, searches_today, searches_extra, mirror_created, mirror_refs FROM users ORDER BY searches_today DESC")
+    cur.execute("SELECT user_id, username, searches_today, searches_extra FROM users ORDER BY searches_today DESC")
     rows = cur.fetchall()
     conn.close()
     if not rows:
         bot.reply_to(message, "📊 Нет пользователей.")
         return
     text = "📊 *Список пользователей*\n\n"
-    for user_id, username, today, extra, mirror, refs in rows[:20]:
-        max_searches = 3 + (2 if mirror > 0 else 0)
-        total = (max_searches - today) + extra + refs
-        text += f"• `{user_id}` — @{username or 'нет'} | запросов: {total} | зеркало: {'✅' if mirror > 0 else '❌'} | пригласил: {refs}\n"
+    for user_id, username, today, extra in rows[:20]:
+        total = (3 - today) + extra
+        text += f"• `{user_id}` — @{username or 'нет'} | запросов: {total}\n"
     bot.reply_to(message, text, parse_mode="Markdown")
 
 # ==================== ОБРАБОТЧИК ТЕКСТА ====================
@@ -1386,21 +1411,16 @@ def handle_text(message):
     chat_id = message.chat.id
     
     if not can_search(user_id):
-        remaining = get_remaining(user_id)
-        max_searches = get_max_searches(user_id)
         bot.reply_to(
             message,
             f"❌ *Лимит поисков исчерпан!*\n\n"
-            f"📊 *Лимит:* {max_searches} поисков в день\n"
-            f"🔍 *Осталось:* {remaining}\n"
-            f"🪞 Создай зеркало, чтобы получить +2 поиска!\n"
-            f"👥 Приглашай друзей, чтобы получить +1 поиск!\n\n"
+            f"Вы использовали все 3 поиска на сегодня.\n"
             f"⏰ Следующий сброс — в 00:00 МСК.",
             parse_mode="Markdown"
         )
         return
     
-    msg = bot.reply_to(message, "⏳ Выполняется глобальный поиск...")
+    msg = bot.reply_to(message, "⏳ Выполняется глобальный поиск по 30+ источникам...")
     
     try:
         loop = asyncio.new_event_loop()
@@ -1410,8 +1430,6 @@ def handle_text(message):
         
         total = data.get("total_results", 0)
         remaining = use_search(user_id)
-        max_searches = get_max_searches(user_id)
-        user_data = get_user(user_id)
         
         report_id = f"{user_id}_{int(datetime.now().timestamp())}"
         html = generate_html_report(text, data, report_id)
@@ -1434,9 +1452,7 @@ def handle_text(message):
                 caption=f"📊 *OSINT-отчёт*\n\n"
                         f"🔍 Запрос: `{text}`\n"
                         f"📌 Найдено: **{total}** результатов\n"
-                        f"🔍 Осталось: **{remaining}/{max_searches}**\n"
-                        f"🪞 Зеркало: {'✅' if user_data.get('mirror_created', 0) > 0 else '❌'}\n"
-                        f"👥 Приглашено: {user_data.get('mirror_refs', 0)}",
+                        f"🔍 Осталось: **{remaining}/3**",
                 parse_mode="Markdown"
             )
         
@@ -1456,8 +1472,4 @@ if __name__ == "__main__":
     init_db()
     logger.info("🚀 OTOB бот запускается...")
     bot.remove_webhook()
-    
-    # Запускаем все зеркала из базы данных
-    start_all_mirrors()
-    
     bot.infinity_polling(timeout=60, long_polling_timeout=30)

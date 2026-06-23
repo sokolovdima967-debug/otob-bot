@@ -11,12 +11,12 @@ import subprocess
 import sys
 import csv
 import io
+import threading
 from datetime import datetime
 from bs4 import BeautifulSoup
 import telebot
 from telebot import types
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
@@ -49,6 +49,17 @@ def init_db():
             mirror_created INTEGER DEFAULT 0,
             mirror_refs INTEGER DEFAULT 0,
             last_reset DATE DEFAULT CURRENT_DATE
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS mirrors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            mirror_token TEXT UNIQUE,
+            bot_username TEXT,
+            bot_name TEXT,
+            created_at DATE DEFAULT CURRENT_DATE,
+            is_active INTEGER DEFAULT 1
         )
     ''')
     conn.commit()
@@ -127,10 +138,31 @@ def get_remaining(user_id: int) -> int:
     total_extra = user["searches_extra"] + user.get("mirror_refs", 0)
     return (max_searches - user["searches_today"]) + total_extra
 
+def get_all_mirror_tokens():
+    """Получает все активные токены зеркал из базы данных"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT id, user_id, mirror_token, bot_username, bot_name FROM mirrors WHERE is_active = 1")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def save_mirror_token(user_id: int, mirror_token: str, bot_username: str = None, bot_name: str = None):
+    """Сохраняет токен зеркала в базу данных"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO mirrors (user_id, mirror_token, bot_username, bot_name, created_at, is_active) VALUES (?, ?, ?, ?, ?, 1)",
+        (user_id, mirror_token, bot_username, bot_name, datetime.now().date().isoformat())
+    )
+    conn.commit()
+    conn.close()
+    logger.info(f"✅ Токен зеркала сохранён в БД: {mirror_token[:10]}...")
+
 # ==================== ХРАНИЛИЩЕ ОТЧЁТОВ ====================
 reports = {}
 
-# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
+# ==================== ИНИЦИАЛИЗАЦИЯ ОСНОВНОГО БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 bot.remove_webhook()
 
@@ -178,6 +210,71 @@ def run_http_server():
     logger.info(f"✅ HTTP-сервер запущен на порту {port}")
 
 run_http_server()
+
+# ==================== ФУНКЦИЯ ЗАПУСКА ЗЕРКАЛ ====================
+
+def run_mirror_bot(mirror_token: str, mirror_id: int):
+    """Запускает зеркального бота в отдельном потоке"""
+    try:
+        mirror_bot = telebot.TeleBot(mirror_token, parse_mode="Markdown")
+        
+        @mirror_bot.message_handler(commands=['start'])
+        def mirror_start(message):
+            mirror_bot.reply_to(
+                message,
+                f"🔍 *OTOB — Osint Tool Olimpov Bot (Зеркало)*\n\n"
+                f"👋 Это зеркало основного бота OTOB.\n"
+                f"📊 Используйте основного бота для поиска.\n\n"
+                f"🪞 Зеркало создано для получения бонусных поисков!\n"
+                f"🔗 Основной бот: @Osint_Tool_Olimpov_bot",
+                parse_mode="Markdown"
+            )
+            # Начисляем бонус владельцу зеркала
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT user_id FROM mirrors WHERE id = ?", (mirror_id,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                owner_id = row[0]
+                user = get_user(owner_id)
+                user["mirror_refs"] += 1
+                update_user(owner_id, user)
+                try:
+                    bot.send_message(owner_id, f"👤 Новый пользователь запустил ваше зеркало! +1 поиск!")
+                except:
+                    pass
+        
+        @mirror_bot.message_handler(func=lambda message: True)
+        def mirror_echo(message):
+            mirror_bot.reply_to(
+                message,
+                f"🔍 Это зеркало OTOB.\n\n"
+                f"📌 Для поиска используйте основного бота:\n"
+                f"@Osint_Tool_Olimpov_bot\n\n"
+                f"🪞 Спасибо, что используете OTOB!",
+                parse_mode="Markdown"
+            )
+        
+        mirror_bot.remove_webhook()
+        mirror_bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        logger.info(f"✅ Зеркало {mirror_token[:10]}... запущено")
+    except Exception as e:
+        logger.error(f"❌ Ошибка запуска зеркала {mirror_token[:10]}...: {e}")
+
+def start_all_mirrors():
+    """Запускает все зеркала из базы данных"""
+    mirrors = get_all_mirror_tokens()
+    if not mirrors:
+        logger.info("ℹ️ Нет активных зеркал")
+        return
+    
+    logger.info(f"🚀 Запуск {len(mirrors)} зеркал...")
+    for mirror_id, user_id, mirror_token, bot_username, bot_name in mirrors:
+        thread = threading.Thread(target=run_mirror_bot, args=(mirror_token, mirror_id))
+        thread.daemon = True
+        thread.start()
+        logger.info(f"✅ Зеркало {mirror_token[:10]}... запущено (ID: {mirror_id})")
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -829,7 +926,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 # ==================== МЕНЮ ====================
 
 def main_menu_keyboard():
-    """Главное меню — с зеркалом"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("🔍 Функции", callback_data="menu_functions"),
@@ -846,7 +942,6 @@ def main_menu_keyboard():
     return markup
 
 def functions_menu_keyboard():
-    """Меню функций — без зеркала"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("🌐 Глобальный поиск", callback_data="global_search")
@@ -955,39 +1050,34 @@ def set_mirror_command(message):
     mirror_token = args[1].strip()
     
     try:
-        import requests
         test_bot = telebot.TeleBot(mirror_token)
-        test_bot.get_me()
+        bot_info = test_bot.get_me()
         
+        # Сохраняем в базу данных
+        save_mirror_token(user_id, mirror_token, bot_info.username, bot_info.first_name)
+        
+        # Обновляем пользователя
         user["mirror_created"] = 1
         user["searches_extra"] += 2
         update_user(user_id, user)
         
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS mirrors (
-                user_id INTEGER,
-                mirror_token TEXT,
-                created_at DATE DEFAULT CURRENT_DATE
-            )
-        ''')
-        cur.execute("INSERT INTO mirrors (user_id, mirror_token) VALUES (?, ?)", (user_id, mirror_token))
-        conn.commit()
-        conn.close()
-        
         bot.reply_to(
             message,
             f"🪞 *Зеркало успешно создано!*\n\n"
-            f"✅ Токен валидный! Бот создан.\n"
+            f"✅ Токен сохранён в базу данных!\n"
+            f"🤖 Бот: @{bot_info.username}\n"
             f"📊 Вы получили **+2 поиска**!\n"
             f"📊 Ваш лимит — **5 поисков в день**.\n\n"
-            f"🔗 Ваш бот: `@{test_bot.get_me().username}`\n\n"
+            f"🔗 Ваш бот: `https://t.me/{bot_info.username}`\n\n"
             f"📌 *Как получить ещё +1 поиск?*\n"
             f"• Отправьте ссылку на вашего бота друзьям\n"
-            f"• Каждый, кто запустит бота → +1 поиск",
+            f"• Каждый, кто запустит бота → +1 поиск\n\n"
+            f"🔄 Бот автоматически проверит все зеркала при перезапуске!",
             parse_mode="Markdown"
         )
+        
+        # Запускаем зеркало сразу
+        threading.Thread(target=run_mirror_bot, args=(mirror_token, 0)).start()
         
     except Exception as e:
         logger.error(f"Mirror set error: {e}")
@@ -1366,4 +1456,8 @@ if __name__ == "__main__":
     init_db()
     logger.info("🚀 OTOB бот запускается...")
     bot.remove_webhook()
+    
+    # Запускаем все зеркала из базы данных
+    start_all_mirrors()
+    
     bot.infinity_polling(timeout=60, long_polling_timeout=30)

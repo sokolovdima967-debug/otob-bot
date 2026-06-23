@@ -33,53 +33,144 @@ ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
 HUNTER_KEY = os.environ.get("HUNTER_KEY")
 
-# ===== ПРОКСИ (из переменных окружения) =====
-PROXY_LIST = os.environ.get("PROXY_LIST", "").split(",")
-if PROXY_LIST and PROXY_LIST[0]:
-    logger.info(f"✅ Загружено {len(PROXY_LIST)} прокси из переменных")
-else:
-    PROXY_LIST = [
-        "socks5://user:pass@proxy1.webshare.io:1080",
-        "socks5://user:pass@proxy2.webshare.io:1080",
-        "socks5://user:pass@proxy3.webshare.io:1080",
-    ]
-    logger.warning("⚠️ Используются примеры прокси! Замените на свои.")
-
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== ПРОКСИ-МОДУЛЬ ====================
+# ==================== АВТОЗАГРУЗКА ПРОКСИ ====================
+
+class ProxyLoader:
+    """Автоматически загружает прокси с публичных источников"""
+    
+    SOURCES = [
+        # HTTP прокси (838 шт)
+        "https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/http.txt",
+        # SOCKS5 прокси (294 шт)
+        "https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/socks5.txt",
+        # Все прокси (693 шт)
+        "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/all.txt",
+        # Резервный источник
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+    ]
+    
+    def __init__(self):
+        self.proxies = []
+        self.last_update = None
+        self.update_interval = 600  # 10 минут
+    
+    async def fetch_proxies_from_url(self, url: str) -> list:
+        """Загружает прокси из одного источника"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status == 200:
+                        text = await resp.text()
+                        proxies = []
+                        for line in text.splitlines():
+                            line = line.strip()
+                            if line and not line.startswith('#'):
+                                # Пробуем определить протокол
+                                if '://' in line:
+                                    proxies.append(line)
+                                else:
+                                    # Если нет протокола — добавляем socks5 по умолчанию
+                                    proxies.append(f"socks5://{line}")
+                        logger.info(f"✅ Загружено {len(proxies)} прокси из {url[:50]}...")
+                        return proxies
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка загрузки {url[:50]}...: {e}")
+        return []
+    
+    async def load_proxies(self):
+        """Загружает прокси из всех источников"""
+        all_proxies = []
+        for url in self.SOURCES:
+            proxies = await self.fetch_proxies_from_url(url)
+            all_proxies.extend(proxies)
+        
+        # Очищаем и удаляем дубликаты
+        unique_proxies = list(set(all_proxies))
+        
+        # Фильтруем только socks5 и http/https
+        filtered = []
+        for p in unique_proxies:
+            if p.startswith(('socks5://', 'socks4://', 'http://', 'https://')):
+                filtered.append(p)
+        
+        # Если ничего не загрузилось — используем запасные
+        if not filtered:
+            logger.warning("⚠️ Не удалось загрузить прокси. Использую запасные.")
+            filtered = [
+                "socks5://45.76.248.194:1080",
+                "socks5://194.182.178.189:1080",
+                "socks5://103.152.112.120:1080",
+                "socks5://185.165.29.183:1080",
+                "socks5://94.130.146.112:1080",
+            ]
+        
+        self.proxies = filtered
+        self.last_update = datetime.now()
+        logger.info(f"✅ Всего загружено {len(self.proxies)} прокси")
+        return self.proxies
+    
+    async def get_proxies(self, force_update: bool = False) -> list:
+        """Возвращает список прокси (с обновлением если нужно)"""
+        if force_update or not self.proxies or not self.last_update:
+            await self.load_proxies()
+        elif (datetime.now() - self.last_update).total_seconds() > self.update_interval:
+            # Фоновое обновление
+            asyncio.create_task(self.load_proxies())
+        return self.proxies
+
+# ==================== ИНИЦИАЛИЗАЦИЯ ПРОКСИ-МЕНЕДЖЕРА ====================
+
+proxy_loader = ProxyLoader()
 
 class ProxyManager:
-    def __init__(self, proxies: list):
-        self.proxies = proxies
+    def __init__(self):
+        self.proxies = []
         self.current_index = 0
         self.failed_proxies = set()
         self.lock = asyncio.Lock()
+        self._initialized = False
+    
+    async def init(self):
+        """Инициализация — загружаем прокси при старте"""
+        if not self._initialized:
+            self.proxies = await proxy_loader.get_proxies()
+            self._initialized = True
+            logger.info(f"🚀 Прокси-менеджер инициализирован: {len(self.proxies)} прокси")
     
     def get_next_proxy(self) -> str:
-        """Возвращает следующий прокси (round-robin)"""
+        """Возвращает следующий рабочий прокси"""
         if not self.proxies:
             return None
-        # Ищем рабочий прокси, пропуская упавшие
+        
+        # Если все прокси упали — сбрасываем и перезагружаем
+        if len(self.failed_proxies) >= len(self.proxies):
+            self.failed_proxies.clear()
+            # Асинхронно обновляем список
+            asyncio.create_task(proxy_loader.load_proxies())
+        
         for _ in range(len(self.proxies)):
             proxy = self.proxies[self.current_index % len(self.proxies)]
             self.current_index += 1
             if proxy not in self.failed_proxies:
                 return proxy
-        # Если все упали — сбрасываем
+        
         self.failed_proxies.clear()
-        return self.proxies[0]
+        return self.proxies[0] if self.proxies else None
     
     def mark_failed(self, proxy: str):
-        """Помечает прокси как упавший"""
-        self.failed_proxies.add(proxy)
-        logger.warning(f"⚠️ Прокси {proxy[:20]}... помечен как нерабочий")
+        """Помечает прокси как нерабочий"""
+        if proxy in self.proxies:
+            self.failed_proxies.add(proxy)
+            logger.info(f"⚠️ Прокси {proxy[:30]}... помечен как нерабочий")
     
-    async def request(self, url: str, method: str = "GET", headers: dict = None, 
+    async def request(self, url: str, method: str = "GET", headers: dict = None,
                       data: dict = None, timeout: int = 30, max_retries: int = 3) -> dict:
         """Выполняет запрос через прокси с автоматическим переключением"""
         headers = headers or {}
@@ -97,13 +188,13 @@ class ProxyManager:
         
         for attempt in range(max_retries):
             proxy = self.get_next_proxy()
-            if not proxy:
-                break
             
             try:
-                # Проверяем тип прокси (socks5://, socks4://, http://)
-                if proxy.startswith("socks5://") or proxy.startswith("socks4://"):
-                    connector = SocksConnector.from_url(proxy)
+                if proxy:
+                    if proxy.startswith(("socks5://", "socks4://")):
+                        connector = SocksConnector.from_url(proxy)
+                    else:
+                        connector = aiohttp.TCPConnector()
                 else:
                     connector = aiohttp.TCPConnector()
                 
@@ -123,31 +214,31 @@ class ProxyManager:
                             result = {"text": await resp.text()}
                         
                         if resp.status == 200:
-                            return {"success": True, "data": result, "status": resp.status}
+                            return {"success": True, "data": result, "status": resp.status, "proxy": proxy}
                         elif resp.status in [403, 429]:
-                            logger.warning(f"⚠️ Блокировка (403/429) на {proxy[:20]}...")
-                            self.mark_failed(proxy)
+                            if proxy:
+                                self.mark_failed(proxy)
                             continue
                         else:
-                            logger.warning(f"⚠️ HTTP {resp.status} на {proxy[:20]}...")
                             continue
                             
             except (aiohttp.ClientConnectorError, aiohttp.ClientProxyConnectionError) as e:
-                logger.warning(f"⚠️ Ошибка соединения {proxy[:20]}...: {e}")
-                self.mark_failed(proxy)
+                if proxy:
+                    self.mark_failed(proxy)
                 last_error = e
             except asyncio.TimeoutError:
-                logger.warning(f"⏰ Таймаут {proxy[:20]}...")
-                self.mark_failed(proxy)
+                if proxy:
+                    self.mark_failed(proxy)
                 last_error = "Timeout"
             except Exception as e:
-                logger.error(f"❌ Ошибка {proxy[:20]}...: {e}")
+                if proxy:
+                    self.mark_failed(proxy)
                 last_error = e
         
         return {"success": False, "error": str(last_error)}
 
-# ==================== ИНИЦИАЛИЗАЦИЯ ПРОКСИ-МЕНЕДЖЕРА ====================
-proxy_manager = ProxyManager(PROXY_LIST)
+# ==================== ИНИЦИАЛИЗАЦИЯ ====================
+proxy_manager = ProxyManager()
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
@@ -315,6 +406,15 @@ def generate_otob_title(query: str, qtype: str) -> str:
     ]
     return random.choice(templates)
 
+def safe_request(func):
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"❌ Ошибка в {func.__name__}: {e}")
+            return None
+    return wrapper
+
 # ==================== ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ====================
 def detect_query_type(query: str) -> str:
     query = query.strip()
@@ -332,21 +432,23 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== API ФУНКЦИИ С ПРОКСИ ====================
+# ==================== API ЧЕРЕЗ ПРОКСИ ====================
 
-async def api_request(url: str, params: dict = None, timeout: int = 30) -> dict:
-    """Универсальный API-запрос через прокси"""
+async def api_request_proxy(url: str, params: dict = None, timeout: int = 30) -> dict:
     result = await proxy_manager.request(url, method="GET", data=params, timeout=timeout)
     if result.get("success"):
         return result.get("data", {})
     return None
 
+# ===== ВСЕ API ФУНКЦИИ (через прокси) =====
+
+@safe_request
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and data.get('valid'):
         return {
             "country": data.get('country_name', '—'),
@@ -356,12 +458,13 @@ async def numverify_lookup(phone: str) -> dict:
         }
     return None
 
+@safe_request
 async def veriphone_lookup(phone: str) -> dict:
     if not VERIPHONE_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.veriphone.io/v2/verify?phone=%2B{clean}&key={VERIPHONE_KEY}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and data.get('phone_valid'):
         return {
             "country": data.get('country', '—'),
@@ -370,12 +473,13 @@ async def veriphone_lookup(phone: str) -> dict:
         }
     return None
 
+@safe_request
 async def abstractapi_lookup(phone: str) -> dict:
     if not ABSTRACT_API_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and data.get('valid'):
         return {
             "country": data.get('country', {}).get('name', '—'),
@@ -385,12 +489,13 @@ async def abstractapi_lookup(phone: str) -> dict:
         }
     return None
 
+@safe_request
 async def bigdatacloud_lookup(phone: str) -> dict:
     if not BIGDATACLOUD_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.bigdatacloud.net/data/phone-validate?phoneNumber=%2B{clean}&key={BIGDATACLOUD_KEY}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and data.get('valid'):
         return {
             "country": data.get('countryName', '—'),
@@ -401,12 +506,13 @@ async def bigdatacloud_lookup(phone: str) -> dict:
         }
     return None
 
+@safe_request
 async def omkarcloud_lookup(phone: str) -> dict:
     if not OMKAR_KEY:
         return None
     clean = re.sub(r'\D', '', phone)
     url = f"https://carrier-lookup-api.omkar.cloud/lookup?phone=%2B{clean}"
-    data = await api_request(url, params={"phone": f"+{clean}"})
+    data = await api_request_proxy(url)
     if data and data.get('is_valid_number'):
         return {
             "carrier": data.get('carrier', '—'),
@@ -415,10 +521,11 @@ async def omkarcloud_lookup(phone: str) -> dict:
         }
     return None
 
+@safe_request
 async def htmlweb_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data:
         return {
             "country": data.get('country', '—'),
@@ -428,19 +535,21 @@ async def htmlweb_lookup(phone: str) -> dict:
         }
     return None
 
+@safe_request
 async def hlr_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://smsc.ru/testhlr.php?phone={clean}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and isinstance(data, dict) and data.get('text'):
         text = data.get('text', '')
         return {"status": "✅ Активен" if 'OK' in text else "❌ Не активен"}
     return None
 
+@safe_request
 async def hudsonrock_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and data.get('total_results', 0) > 0:
         return {
             "found": True,
@@ -449,11 +558,12 @@ async def hudsonrock_lookup(phone: str) -> dict:
         }
     return None
 
+@safe_request
 async def hunter_lookup(email: str) -> dict:
     if not HUNTER_KEY:
         return None
     url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_KEY}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data:
         result = data.get('data', {})
         return {
@@ -465,9 +575,10 @@ async def hunter_lookup(email: str) -> dict:
         }
     return None
 
+@safe_request
 async def emailrep_lookup(email: str) -> dict:
     url = f"https://emailrep.io/{email}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data:
         return {
             "reputation": data.get('reputation', '—'),
@@ -476,16 +587,18 @@ async def emailrep_lookup(email: str) -> dict:
         }
     return None
 
+@safe_request
 async def hibp_lookup(email: str) -> list:
     url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and isinstance(data, list):
         return [b.get('Name') for b in data]
     return []
 
+@safe_request
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data:
         return {
             "country": data.get('country', '—'),
@@ -495,27 +608,10 @@ async def ipinfo_lookup(ip: str) -> dict:
         }
     return None
 
-async def crtsh_lookup(domain: str) -> list:
-    url = f"https://crt.sh/?q={domain}&output=json"
-    data = await api_request(url)
-    if data and isinstance(data, list):
-        return [{"domain": item.get('name_value', '—')} for item in data[:5]]
-    return []
-
-async def whois_lookup(domain: str) -> dict:
-    url = f"https://api.whois.vu/?q={domain}"
-    data = await api_request(url)
-    if data:
-        return {
-            "registrar": data.get('registrar', '—'),
-            "creation_date": data.get('creation_date', '—'),
-            "expiration_date": data.get('expiration_date', '—')
-        }
-    return None
-
+@safe_request
 async def ip_api_lookup(ip: str) -> dict:
     url = f"http://ip-api.com/json/{ip}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data and data.get('status') == 'success':
         return {
             "country": data.get('country', '—'),
@@ -526,9 +622,10 @@ async def ip_api_lookup(ip: str) -> dict:
         }
     return None
 
+@safe_request
 async def github_username_lookup(username: str) -> dict:
     url = f"https://api.github.com/users/{username}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data:
         return {
             "name": data.get('name', '—'),
@@ -541,6 +638,7 @@ async def github_username_lookup(username: str) -> dict:
         }
     return None
 
+@safe_request
 async def telegram_username_lookup(username: str) -> dict:
     url = f"https://t.me/{username}"
     result = await proxy_manager.request(url)
@@ -548,9 +646,43 @@ async def telegram_username_lookup(username: str) -> dict:
         return {"exists": True, "url": f"https://t.me/{username}"}
     return {"exists": False}
 
+@safe_request
+async def crtsh_lookup(domain: str) -> list:
+    url = f"https://crt.sh/?q={domain}&output=json"
+    data = await api_request_proxy(url)
+    if data and isinstance(data, list):
+        return [{"domain": item.get('name_value', '—')} for item in data[:5]]
+    return []
+
+@safe_request
+async def whois_lookup(domain: str) -> dict:
+    url = f"https://api.whois.vu/?q={domain}"
+    data = await api_request_proxy(url)
+    if data:
+        return {
+            "registrar": data.get('registrar', '—'),
+            "creation_date": data.get('creation_date', '—'),
+            "expiration_date": data.get('expiration_date', '—')
+        }
+    return None
+
+@safe_request
+async def numberlookup_api(phone: str) -> dict:
+    clean = re.sub(r'\D', '', phone)
+    url = f"https://numberlookupapi.com/api?number={clean}"
+    data = await api_request_proxy(url)
+    if data and data.get('valid'):
+        return {
+            "country": data.get('country', '—'),
+            "carrier": data.get('carrier', '—'),
+            "line_type": data.get('line_type', '—')
+        }
+    return None
+
+@safe_request
 async def zippopotam_lookup(postal_code: str, country: str = "RU") -> dict:
     url = f"https://api.zippopotam.us/{country}/{postal_code}"
-    data = await api_request(url)
+    data = await api_request_proxy(url)
     if data:
         return {
             "country": data.get('country', '—'),
@@ -558,9 +690,9 @@ async def zippopotam_lookup(postal_code: str, country: str = "RU") -> dict:
         }
     return None
 
-# ==================== ПАРСЕРЫ С ПРОКСИ ====================
+# ==================== ПАРСЕРЫ ЧЕРЕЗ ПРОКСИ ====================
 
-async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
+async def parse_site_proxy(url: str, selectors: dict, max_results: int = 10) -> list:
     headers = {
         "User-Agent": random.choice([
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
@@ -600,22 +732,22 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
 async def xray_lookup(query: str) -> list:
     url = f"https://x-ray.contact/search?q={query}"
     selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 15)
+    return await parse_site_proxy(url, selectors, 15)
 
 async def idcrawl_lookup(query: str) -> list:
     url = f"https://idcrawl.com/{query}"
     selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 15)
+    return await parse_site_proxy(url, selectors, 15)
 
 async def syncme_lookup(phone: str) -> list:
     url = f"https://sync.me/search?q={phone}"
     selectors = {"result": ".profile, .card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".phone, .location"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_proxy(url, selectors, 5)
 
 async def whoseno_lookup(phone: str) -> list:
     url = f"https://whoseno.com/search?q={phone}"
     selectors = {"result": ".result, .card", "title": ".name, .title", "text": ".description", "extra": ".phone"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_proxy(url, selectors, 5)
 
 async def truepeoplesearch_lookup(query: str) -> list:
     if re.search(r'\d', query):
@@ -623,810 +755,21 @@ async def truepeoplesearch_lookup(query: str) -> list:
     else:
         url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
     selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
-    return await parse_site(url, selectors, 10)
+    return await parse_site_proxy(url, selectors, 10)
 
 async def truecaller_parse(phone: str) -> list:
     clean = re.sub(r'\D', '', phone)
     url = f"https://www.truecaller.com/search/{clean}"
     selectors = {"result": ".profile, .card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".phone, .location"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_proxy(url, selectors, 5)
 
 async def spokeo_parse(phone: str) -> list:
     clean = re.sub(r'\D', '', phone)
     url = f"https://www.spokeo.com/{clean}/search"
     selectors = {"result": ".result-item, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_proxy(url, selectors, 5)
 
 async def whitepages_parse(phone: str) -> list:
     clean = re.sub(r'\D', '', phone)
     url = f"https://www.whitepages.com/phone/{clean}"
-    selectors = {"result": ".card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-async def fastpeoplesearch_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-async def duckduckgo_search(query: str) -> list:
-    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
-    return await parse_site(url, selectors, 5)
-
-async def wikipedia_lookup(query: str) -> list:
-    url = f"https://ru.wikipedia.org/wiki/{query.replace(' ', '_')}"
-    selectors = {"result": ".mw-parser-output p", "title": "h1.firstHeading", "text": ".mw-parser-output p"}
-    return await parse_site(url, selectors, 3)
-
-async def fssp_lookup(fio: str) -> dict:
-    try:
-        params = {"name": fio}
-        result = await proxy_manager.request("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", data=params, timeout=30)
-        if result.get("success"):
-            data = result.get("data", {})
-            if data.get("response", {}).get("count"):
-                return {
-                    "found": True,
-                    "count": data["response"]["count"],
-                    "debts": data["response"].get("items", [])[:3]
-                }
-    except:
-        pass
-    return {"found": False}
-
-# ==================== НОВЫЕ ФУНКЦИИ ====================
-
-async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if stdout:
-            data = json.loads(stdout)
-            if data.get('results'):
-                return {
-                    "found": True,
-                    "total": len(data['results']),
-                    "businesses": data['results'][:5],
-                    "source": "LeadFinder"
-                }
-    except:
-        pass
-    return None
-
-async def freephonenum_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.freephonenum.com/search?q={clean}"
-    selectors = {"result": ".result, .card, .phone-info", "title": ".title, .name", "text": ".description, .text"}
-    return await parse_site(url, selectors, 3)
-
-async def phonesearch_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.phonesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .title", "extra": ".address, .location"}
-    return await parse_site(url, selectors, 3)
-
-async def callerid_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.callerid.com/phone/{clean}"
-    selectors = {"result": ".result, .card, .info", "title": ".name, .title", "extra": ".spam, .warning"}
-    return await parse_site(url, selectors, 3)
-
-async def numberlookup_api(phone: str) -> dict:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://numberlookupapi.com/api?number={clean}"
-    data = await api_request(url)
-    if data and data.get('valid'):
-        return {
-            "country": data.get('country', '—'),
-            "carrier": data.get('carrier', '—'),
-            "line_type": data.get('line_type', '—')
-        }
-    return None
-
-async def telegram_bot_parser(phone: str) -> dict:
-    results = {}
-    bots = {
-        "sherlock": "https://sherlock-tg.vercel.app/api/search?q={phone}",
-        "osant": "https://osant-bot.vercel.app/api/phone?number={phone}",
-    }
-    for name, url_template in bots.items():
-        try:
-            url = url_template.format(phone=phone)
-            data = await api_request(url)
-            if data:
-                results[name] = data
-        except:
-            pass
-    if results:
-        return {"found": True, "results": results, "source": "TelegramBots"}
-    return None
-
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
-
-async def global_lookup(query: str) -> dict:
-    query = query.strip()
-    qtype = detect_query_type(query)
-    
-    result = {
-        "query": query,
-        "type": qtype,
-        "timestamp": datetime.now().isoformat(),
-        "sources": {},
-        "total_results": 0
-    }
-    
-    total = 0
-    tasks = []
-    
-    if qtype == "phone":
-        tasks = [
-            ("numverify", numverify_lookup(query)),
-            ("veriphone", veriphone_lookup(query)),
-            ("abstractapi", abstractapi_lookup(query)),
-            ("bigdatacloud", bigdatacloud_lookup(query)),
-            ("omkarcloud", omkarcloud_lookup(query)),
-            ("htmlweb", htmlweb_lookup(query)),
-            ("hlr", hlr_lookup(query)),
-            ("hudsonrock", hudsonrock_lookup(query)),
-            ("numberlookup", numberlookup_api(query)),
-            ("leadfinder", leadfinder_lookup(query)),
-            ("telegram_bots", telegram_bot_parser(query)),
-            ("freephonenum", freephonenum_parse(query)),
-            ("phonesearch", phonesearch_parse(query)),
-            ("callerid", callerid_parse(query)),
-            ("xray", xray_lookup(query)),
-            ("idcrawl", idcrawl_lookup(query)),
-            ("syncme", syncme_lookup(query)),
-            ("whoseno", whoseno_lookup(query)),
-            ("truepeoplesearch", truepeoplesearch_lookup(query)),
-            ("truecaller", truecaller_parse(query)),
-            ("spokeo", spokeo_parse(query)),
-            ("whitepages", whitepages_parse(query)),
-            ("fastpeoplesearch", fastpeoplesearch_parse(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-            ("wikipedia", wikipedia_lookup(query)),
-        ]
-        
-        if len(query.split()) >= 2:
-            tasks.append(("fssp", fssp_lookup(query)))
-    
-    elif qtype == "email":
-        tasks = [
-            ("emailrep", emailrep_lookup(query)),
-            ("hibp", hibp_lookup(query)),
-            ("hudsonrock", hudsonrock_lookup(query)),
-            ("hunter", hunter_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-            ("leadfinder", leadfinder_lookup(query)),
-        ]
-    
-    elif qtype == "domain":
-        tasks = [
-            ("crtsh", crtsh_lookup(query)),
-            ("whois", whois_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-        ]
-    
-    elif qtype == "username":
-        tasks = [
-            ("xray", xray_lookup(query)),
-            ("idcrawl", idcrawl_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-            ("github", github_username_lookup(query)),
-            ("telegram", telegram_username_lookup(query)),
-        ]
-    
-    elif qtype == "ip":
-        tasks = [
-            ("ipinfo", ipinfo_lookup(query)),
-            ("ip_api", ip_api_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-        ]
-    else:
-        tasks = [("duckduckgo", duckduckgo_search(query))]
-    
-    if tasks:
-        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-        for idx, (name, _) in enumerate(tasks):
-            if results[idx] and not isinstance(results[idx], Exception):
-                result["sources"][name] = results[idx]
-                if isinstance(results[idx], list):
-                    total += len(results[idx])
-                else:
-                    total += 1
-    
-    result["total_results"] = total
-    return result
-
-# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
-
-def generate_html_report(query: str, data: dict, report_id: str) -> str:
-    sources = data.get("sources", {})
-    qtype = data.get("type", "text")
-    total = data.get("total_results", 0)
-    
-    all_results = []
-    for source_name, items in sources.items():
-        if items:
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
-                        all_results.append(item)
-                    else:
-                        all_results.append({"title": str(item)})
-            elif isinstance(items, dict):
-                all_results.append(items)
-            else:
-                all_results.append({"title": str(items)})
-    
-    title = generate_otob_title(query, qtype)
-    
-    html = f"""
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title}</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            background: #0a0a0a;
-            color: #c0c0c0;
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            padding: 30px 20px;
-            line-height: 1.6;
-            min-height: 100vh;
-        }}
-        .container {{
-            max-width: 1000px;
-            margin: 0 auto;
-            background: #121212;
-            border-radius: 12px;
-            padding: 35px 40px;
-            border: 1px solid #2a0a0a;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.9);
-            position: relative;
-        }}
-        .watermark {{
-            position: absolute;
-            top: 20px;
-            left: 30px;
-            z-index: 10;
-            opacity: 0.3;
-            user-select: none;
-            pointer-events: none;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }}
-        .watermark svg {{
-            width: 55px;
-            height: 65px;
-        }}
-        .watermark .text {{
-            color: #8a2a2a;
-            font-size: 13px;
-            font-weight: 700;
-            letter-spacing: 3px;
-            margin-top: 2px;
-            text-transform: uppercase;
-            font-family: 'Segoe UI', sans-serif;
-        }}
-        .header {{
-            border-bottom: 2px solid #2a0a0a;
-            padding-bottom: 18px;
-            margin-bottom: 22px;
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            flex-wrap: wrap;
-            padding-left: 80px;
-        }}
-        .header h1 {{
-            font-size: 26px;
-            font-weight: 700;
-            color: #e8d0d0;
-            letter-spacing: 1px;
-        }}
-        .header h1 span {{
-            color: #8a2a2a;
-        }}
-        .header .sub {{
-            color: #7a4a4a;
-            font-size: 13px;
-            margin-top: 4px;
-        }}
-        .badge {{
-            display: inline-block;
-            background: #1a0a0a;
-            padding: 4px 14px;
-            border-radius: 6px;
-            font-size: 12px;
-            color: #cc6a6a;
-            border: 1px solid #3a1a1a;
-        }}
-        .badge-success {{ background: #1a0a0a; color: #cc6a6a; border-color: #3a1a1a; }}
-        .result-item {{
-            margin: 12px 0;
-            padding: 14px 20px;
-            background: #0e0e0e;
-            border-radius: 8px;
-            border-left: 4px solid #4a1a1a;
-            transition: 0.2s;
-        }}
-        .result-item:hover {{
-            background: #181010;
-            border-left-color: #7a2a2a;
-        }}
-        .result-item .title {{
-            font-size: 16px;
-            font-weight: 500;
-            color: #d8c8c8;
-        }}
-        .result-item .title a {{
-            color: #cc7a7a;
-            text-decoration: none;
-            border-bottom: 1px dotted #4a2a2a;
-        }}
-        .result-item .title a:hover {{
-            color: #e8a0a0;
-        }}
-        .result-item .text {{
-            font-size: 14px;
-            color: #9a8a8a;
-            margin-top: 6px;
-        }}
-        .result-item .extra {{
-            font-size: 13px;
-            color: #7a4a4a;
-            margin-top: 4px;
-        }}
-        .result-item .index {{
-            display: inline-block;
-            background: #1a0a0a;
-            color: #8a4a4a;
-            font-size: 12px;
-            padding: 1px 12px;
-            border-radius: 4px;
-            margin-right: 10px;
-        }}
-        .empty {{ color: #5a3a3a; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
-        .stats {{ margin-top: 20px; padding: 12px 20px; background: #0e0e0e; border-radius: 8px; border: 1px solid #1a0a0a; color: #7a4a4a; font-size: 13px; text-align: center; }}
-        .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #1a0a0a; font-size: 12px; color: #4a2a2a; text-align: center; }}
-        .footer a {{ color: #7a3a3a; text-decoration: none; }}
-        .footer a:hover {{ color: #aa5a5a; }}
-        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header {{ padding-left: 0; padding-top: 70px; }} .watermark {{ top: 10px; left: 15px; }} .watermark svg {{ width: 40px; height: 50px; }} }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="watermark">
-            <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <polygon points="50,5 5,90 95,90" stroke="#8a2a2a" stroke-width="2.5" fill="none"/>
-                <line x1="50" y1="5" x2="50" y2="90" stroke="#5a2a2a" stroke-width="0.8" stroke-dasharray="4,4"/>
-                <line x1="18" y1="70" x2="82" y2="70" stroke="#5a2a2a" stroke-width="0.8" stroke-dasharray="4,4"/>
-                <line x1="27" y1="50" x2="73" y2="50" stroke="#5a2a2a" stroke-width="0.8" stroke-dasharray="4,4"/>
-                <ellipse cx="50" cy="45" rx="15" ry="11" stroke="#d0d0d0" stroke-width="2" fill="none"/>
-                <circle cx="50" cy="45" r="4.5" stroke="#d0d0d0" stroke-width="1.8" fill="none"/>
-                <circle cx="50" cy="45" r="2" fill="#d0d0d0"/>
-                <circle cx="47" cy="42" r="2.5" fill="#d0d0d0" opacity="0.25"/>
-            </svg>
-            <div class="text">OTOB</div>
-        </div>
-        <div class="header">
-            <div>
-                <h1>OTOB <span>Osint Tool Olimpov Bot</span></h1>
-                <div class="sub">Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
-            </div>
-            <div><span class="badge badge-success">найдено: {total}</span></div>
-        </div>
-"""
-    
-    if all_results:
-        for idx, item in enumerate(all_results[:25], 1):
-            title = item.get('title', '—')[:60]
-            text = item.get('text', '')[:200]
-            extra = item.get('extra', '')
-            
-            details = []
-            for key, value in item.items():
-                if key not in ['title', 'text', 'extra'] and value:
-                    if isinstance(value, str) and value != '—' and value != '':
-                        details.append(f"{key}: {value}")
-                    elif isinstance(value, list) and value:
-                        details.append(f"{key}: {', '.join(str(v) for v in value[:5])}")
-                    elif isinstance(value, dict) and value:
-                        for k, v in value.items():
-                            if v and v != '—':
-                                details.append(f"{key}.{k}: {v}")
-            
-            html += f"""
-        <div class="result-item">
-            <div class="title">
-                <span class="index">#{idx}</span>
-                {title}
-            </div>
-"""
-            if text and text != '—' and text != '':
-                html += f"            <div class=\"text\">{text}</div>\n"
-            if extra:
-                html += f"            <div class=\"extra\">📎 {extra}</div>\n"
-            if details:
-                for detail in details[:6]:
-                    html += f"            <div class=\"extra\">• {detail}</div>\n"
-            html += "        </div>\n"
-        
-        html += f"""
-        <div class="stats">📊 Найдено <strong>{total}</strong> результатов</div>
-"""
-    else:
-        html += '<div class="empty">❌ Ничего не найдено</div>'
-    
-    html += f"""
-        <div class="footer">🛡️ OTOB — Osint Tool Olimpov Bot · <a href="https://t.me/Osint_Tool_Olimpov_bot" target="_blank">@Osint_Tool_Olimpov_bot</a></div>
-    </div>
-</body>
-</html>
-"""
-    return html
-
-# ==================== МЕНЮ ====================
-
-def main_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🔍 Функции", callback_data="menu_functions")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"),
-        types.InlineKeyboardButton("📊 Баланс", callback_data="menu_balance")
-    )
-    markup.add(
-        types.InlineKeyboardButton("❓ Помощь", callback_data="menu_help"),
-        types.InlineKeyboardButton("🧑‍💻 Разработчики", url="https://t.me/lkblyad")
-    )
-    return markup
-
-def functions_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🌐 Глобальный поиск", callback_data="global_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📧 Email", callback_data="email_search"),
-        types.InlineKeyboardButton("📱 Телефон", callback_data="phone_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👤 Username", callback_data="username_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-    )
-    return markup
-
-# ==================== ОБРАБОТЧИКИ ====================
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    try:
-        bot.answer_callback_query(call.id)
-        
-        if call.data == "menu_back":
-            bot.edit_message_text(
-                "🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
-                "👋 Привет! Я помогу тебе найти информацию в открытых источниках.\n\n"
-                "📌 *Выбери действие:*",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard()
-            )
-            return
-        
-        if call.data == "menu_functions":
-            bot.edit_message_text(
-                "🔍 *Выбери функцию:*\n\n"
-                "📌 *Основной поиск:*\n"
-                "• 🌐 Глобальный поиск — номер, email, ФИО, IP, домен\n\n"
-                "📌 *Быстрый поиск:*\n"
-                "• 📧 Email — проверка утечек\n"
-                "• 📱 Телефон — оператор, регион\n"
-                "• 👤 Username — поиск в соцсетях",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=functions_menu_keyboard()
-            )
-            return
-        
-        if call.data == "menu_profile":
-            user = call.from_user
-            user_data = get_user(user.id, user.username or "Unknown")
-            remaining = get_remaining(user.id)
-            text = (
-                "👤 *Твой профиль*\n\n"
-                f"🆔 ID: `{user.id}`\n"
-                f"👤 Username: @{user.username or 'нет'}\n"
-                f"📛 Имя: {user.first_name or '—'}\n\n"
-                f"📊 Использовано: {user_data['searches_today']}/3\n"
-                f"📊 Бонусных: {user_data['searches_extra']}\n"
-                f"📊 Осталось: {remaining}\n"
-                f"⏰ Сброс: в 00:00 МСК\n"
-                f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
-            )
-            bot.edit_message_text(
-                text,
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "menu_balance":
-            user_id = call.from_user.id
-            remaining = get_remaining(user_id)
-            used = get_user(user_id)["searches_today"]
-            extra = get_user(user_id)["searches_extra"]
-            text = (
-                "📊 *Твой баланс*\n\n"
-                f"🔍 Использовано: {used}/3\n"
-                f"📊 Бонусных: {extra}\n"
-                f"📊 Осталось: {remaining}\n"
-                f"⏰ Сброс: в 00:00 МСК\n"
-                f"👑 Админ: {'безлимитный' if user_id == ADMIN_ID else 'нет'}"
-            )
-            bot.edit_message_text(
-                text,
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "menu_help":
-            bot.edit_message_text(
-                "❓ *Помощь*\n\n"
-                "📌 *Как пользоваться:*\n"
-                "• Отправь номер, email, никнейм, IP или домен\n"
-                "• Глобальный поиск — всё в одном запросе\n\n"
-                "📊 *Лимит:* 3 поиска в день (сброс в 00:00 МСК)\n"
-                "👑 *Админ:* безлимитный доступ\n\n"
-                "🧑‍💻 *Канал разработчиков:* @lkblyad",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "global_search":
-            bot.edit_message_text(
-                "🌐 *Глобальный поиск*\n\n"
-                "Отправь запрос для поиска:\n"
-                "• Номер: +79991234567\n"
-                "• ФИО: Иванов Иван Иванович\n"
-                "• Email: user@example.com\n"
-                "• Никнейм: username\n"
-                "• IP: 8.8.8.8\n"
-                "• Домен: example.com\n"
-                "• Любой текст\n\n"
-                "ℹ️ 35+ OSINT-источников",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "email_search":
-            bot.edit_message_text(
-                "📧 *Проверка email*\n\n"
-                "Отправь email для проверки утечек.\n\n"
-                "Пример: user@example.com",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "phone_search":
-            bot.edit_message_text(
-                "📱 *Проверка телефона*\n\n"
-                "Отправь номер для проверки.\n\n"
-                "Пример: +79991234567",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "username_search":
-            bot.edit_message_text(
-                "👤 *Поиск по username*\n\n"
-                "Отправь никнейм для поиска в соцсетях.\n\n"
-                "Пример: username",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-            
-    except Exception as e:
-        logger.error(f"❌ Callback error: {e}")
-
-# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
-
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    try:
-        remaining = get_remaining(message.from_user.id)
-        bot.send_message(
-            message.chat.id,
-            f"🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
-            f"👋 Привет, {message.from_user.first_name}!\n\n"
-            f"📊 *Осталось:* {remaining}/3\n\n"
-            f"📌 *Выбери действие:*",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
-        )
-    except Exception as e:
-        logger.error(f"Start error: {e}")
-
-@bot.message_handler(commands=['give'])
-def give_command(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
-        return
-    try:
-        args = message.text.split()
-        if len(args) < 3:
-            bot.reply_to(message, "❗ /give <кол-во> <user_id>")
-            return
-        amount = int(args[1])
-        target_id = int(args[2])
-        user = get_user(target_id)
-        user["searches_today"] = max(0, user["searches_today"] - amount)
-        update_user(target_id, user)
-        bot.reply_to(message, f"✅ Выдано {amount} запросов пользователю `{target_id}`.", parse_mode="Markdown")
-    except:
-        bot.reply_to(message, "⚠️ Ошибка. /give <кол-во> <user_id>")
-
-@bot.message_handler(commands=['take'])
-def take_command(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
-        return
-    try:
-        args = message.text.split()
-        if len(args) < 3:
-            bot.reply_to(message, "❗ /take <кол-во> <user_id>")
-            return
-        amount = int(args[1])
-        target_id = int(args[2])
-        user = get_user(target_id)
-        user["searches_extra"] = max(0, user["searches_extra"] - amount)
-        update_user(target_id, user)
-        bot.reply_to(message, f"✅ Забрано {amount} запросов у пользователя `{target_id}`.", parse_mode="Markdown")
-    except:
-        bot.reply_to(message, "⚠️ Ошибка. /take <кол-во> <user_id>")
-
-@bot.message_handler(commands=['users'])
-def users_command(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id, username, searches_today, searches_extra FROM users ORDER BY searches_today DESC")
-        rows = cur.fetchall()
-        conn.close()
-        if not rows:
-            bot.reply_to(message, "📊 Нет пользователей.")
-            return
-        text = "📊 *Список пользователей*\n\n"
-        for user_id, username, today, extra in rows[:20]:
-            total = (3 - today) + extra
-            text += f"• `{user_id}` — @{username or 'нет'} | запросов: {total}\n"
-        bot.reply_to(message, text, parse_mode="Markdown")
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка: {e}")
-
-# ==================== ОБРАБОТЧИК ТЕКСТА ====================
-
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    try:
-        text = message.text.strip()
-        if not text or text.startswith('/'):
-            return
-        
-        user_id = message.from_user.id
-        chat_id = message.chat.id
-        
-        if not can_search(user_id):
-            bot.reply_to(message, "❌ *Лимит поисков исчерпан!*\n\n⏰ Сброс в 00:00 МСК", parse_mode="Markdown")
-            return
-        
-        # Отправляем сообщение с приблизительным временем
-        start_time = time.time()
-        msg = bot.reply_to(
-            message,
-            "⏳ *Поиск по 35+ источникам...*\n"
-            "⏱️ Приблизительное время: ~15-30 секунд",
-            parse_mode="Markdown"
-        )
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        data = loop.run_until_complete(global_lookup(text))
-        loop.close()
-        
-        elapsed = time.time() - start_time
-        
-        total = data.get("total_results", 0)
-        remaining = use_search(user_id)
-        
-        report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-        html = generate_html_report(text, data, report_id)
-        
-        reports[report_id] = {"query": text, "data": data, "html": html, "created": datetime.now().timestamp()}
-        
-        filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(html)
-        
-        with open(filename, "rb") as f:
-            bot.send_document(
-                chat_id,
-                f,
-                caption=f"📊 *OSINT-отчёт*\n\n"
-                        f"🔍 Запрос: `{text}`\n"
-                        f"📌 Найдено: **{total}**\n"
-                        f"🔍 Осталось: **{remaining}/3**\n"
-                        f"⏱️ Время поиска: **{elapsed:.1f} сек**",
-                parse_mode="Markdown"
-            )
-        
-        os.remove(filename)
-        bot.delete_message(chat_id, msg.message_id)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        try:
-            bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-        except:
-            pass
-
-# ==================== ЗАПУСК ====================
-
-if __name__ == "__main__":
-    init_db()
-    logger.info("🚀 OTOB бот запускается...")
-    bot.remove_webhook()
-    bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    selectors = {"result": ".card, .result-item", "title": ".name, .title", "text": ".

@@ -13,24 +13,24 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 ENV GOPATH="/go"
 ENV PATH="${GOPATH}/bin:${PATH}"
 
-# ===== УСТАНОВКА WEREWIKS =====
+# Установка WEREWIKS
 RUN go install github.com/v0lc3/WEREWIKS@latest
 
-# ===== УСТАНОВКА DIGI-NETRA =====
+# Установка DIGI-NETRA
 RUN git clone https://github.com/Kauravsrestha-Duryodhan/DIGI-NETRA.git /digi-netra && \
     cd /digi-netra && \
-    pip install -r requirements.txt
+    pip install -r requirements.txt || true
 
-# ===== УСТАНОВКА XTRA =====
+# Установка XTRA
 RUN git clone https://github.com/expl0itlab/xtra.git /xtra && \
     chmod +x /xtra/xtra.sh
 
-# ===== УСТАНОВКА CreepyEYE-Genesis =====
+# Установка CreepyEYE-Genesis
 RUN git clone https://github.com/CreepyHunterX/CreepyEYE-Genesis.git /creepyeye && \
     cd /creepyeye && \
-    pip install -r requirements.txt
+    pip install -r requirements.txt || true
 
-# ===== Python-инструменты =====
+# Python-инструменты
 RUN pip install --no-cache-dir \
     sherlock-project \
     holehe \
@@ -40,6 +40,8 @@ RUN pip install --no-cache-dir \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-COPY bot.py .
 
-CMD ["python", "bot.py"]
+# ===== ИЗМЕНЕНО: bot.py → app.py =====
+COPY app.py .
+
+CMD ["python", "app.py"]

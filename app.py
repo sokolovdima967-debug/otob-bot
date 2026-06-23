@@ -87,7 +87,6 @@ def reset_daily_searches():
     conn.close()
 
 def get_max_searches(user_id: int) -> int:
-    """Максимальное количество поисков: 3 базовых + 2 за создание зеркала"""
     user = get_user(user_id)
     return 3 + (2 if user.get("mirror_created", 0) > 0 else 0)
 
@@ -97,7 +96,6 @@ def can_search(user_id: int) -> bool:
     reset_daily_searches()
     user = get_user(user_id)
     max_searches = get_max_searches(user_id)
-    # Учитываем бонусные поиски от рефералов
     total_extra = user["searches_extra"] + user.get("mirror_refs", 0)
     return user["searches_today"] < max_searches or total_extra > 0
 
@@ -627,44 +625,147 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     <title>{title}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ background: #0a0a0a; color: #c0c0c0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 30px 20px; line-height: 1.6; min-height: 100vh; }}
-        .container {{ max-width: 1000px; margin: 0 auto; background: #1a1a1a; border-radius: 10px; padding: 30px 35px; border: 1px solid #2a0a0a; box-shadow: 0 20px 60px rgba(0,0,0,0.9); position: relative; }}
-        .watermark {{ position: absolute; top: 20px; left: 25px; z-index: 10; opacity: 0.25; user-select: none; pointer-events: none; display: flex; flex-direction: column; align-items: center; }}
-        .watermark svg {{ width: 60px; height: 60px; }}
-        .watermark .text {{ color: #6a2a2a; font-size: 14px; font-weight: 700; letter-spacing: 3px; margin-top: 2px; text-transform: uppercase; font-family: 'Segoe UI', sans-serif; }}
-        .header {{ border-bottom: 2px solid #2a0a0a; padding-bottom: 18px; margin-bottom: 22px; display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; padding-left: 80px; }}
-        .header h1 {{ font-size: 24px; font-weight: 600; color: #e0d0d0; }}
-        .header h1 span {{ color: #8a3a3a; }}
-        .header .sub {{ color: #7a5a5a; font-size: 13px; margin-top: 4px; }}
-        .badge {{ display: inline-block; background: #2a0a0a; padding: 3px 12px; border-radius: 4px; font-size: 12px; color: #cc8a8a; border: 1px solid #3a1a1a; }}
+        body {{
+            background: #0a0a0a;
+            color: #c0c0c0;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            padding: 30px 20px;
+            line-height: 1.6;
+            min-height: 100vh;
+        }}
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+            background: #121212;
+            border-radius: 12px;
+            padding: 35px 40px;
+            border: 1px solid #2a0a0a;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.9);
+            position: relative;
+        }}
+        .watermark {{
+            position: absolute;
+            top: 20px;
+            left: 30px;
+            z-index: 10;
+            opacity: 0.3;
+            user-select: none;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        .watermark svg {{
+            width: 55px;
+            height: 65px;
+        }}
+        .watermark .text {{
+            color: #8a2a2a;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            margin-top: 2px;
+            text-transform: uppercase;
+            font-family: 'Segoe UI', sans-serif;
+        }}
+        .header {{
+            border-bottom: 2px solid #2a0a0a;
+            padding-bottom: 18px;
+            margin-bottom: 22px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            padding-left: 80px;
+        }}
+        .header h1 {{
+            font-size: 26px;
+            font-weight: 700;
+            color: #e8d0d0;
+            letter-spacing: 1px;
+        }}
+        .header h1 span {{
+            color: #8a2a2a;
+        }}
+        .header .sub {{
+            color: #7a4a4a;
+            font-size: 13px;
+            margin-top: 4px;
+        }}
+        .badge {{
+            display: inline-block;
+            background: #1a0a0a;
+            padding: 4px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #cc6a6a;
+            border: 1px solid #3a1a1a;
+        }}
         .badge-success {{ background: #1a0a0a; color: #cc6a6a; border-color: #3a1a1a; }}
-        .result-item {{ margin: 12px 0; padding: 14px 18px; background: #121212; border-radius: 6px; border-left: 3px solid #3a1a1a; }}
-        .result-item .title {{ font-size: 16px; font-weight: 500; color: #d0c0c0; }}
-        .result-item .title a {{ color: #cc8a8a; text-decoration: none; border-bottom: 1px dotted #4a2a2a; }}
-        .result-item .title a:hover {{ color: #e0a0a0; }}
-        .result-item .text {{ font-size: 14px; color: #9a8a8a; margin-top: 6px; }}
-        .result-item .extra {{ font-size: 13px; color: #7a5a5a; margin-top: 4px; }}
-        .result-item .index {{ display: inline-block; background: #1a0a0a; color: #8a5a5a; font-size: 12px; padding: 1px 10px; border-radius: 4px; margin-right: 10px; }}
+        .result-item {{
+            margin: 12px 0;
+            padding: 14px 20px;
+            background: #0e0e0e;
+            border-radius: 8px;
+            border-left: 4px solid #4a1a1a;
+            transition: 0.2s;
+        }}
+        .result-item:hover {{
+            background: #181010;
+            border-left-color: #7a2a2a;
+        }}
+        .result-item .title {{
+            font-size: 16px;
+            font-weight: 500;
+            color: #d8c8c8;
+        }}
+        .result-item .title a {{
+            color: #cc7a7a;
+            text-decoration: none;
+            border-bottom: 1px dotted #4a2a2a;
+        }}
+        .result-item .title a:hover {{
+            color: #e8a0a0;
+        }}
+        .result-item .text {{
+            font-size: 14px;
+            color: #9a8a8a;
+            margin-top: 6px;
+        }}
+        .result-item .extra {{
+            font-size: 13px;
+            color: #7a4a4a;
+            margin-top: 4px;
+        }}
+        .result-item .index {{
+            display: inline-block;
+            background: #1a0a0a;
+            color: #8a4a4a;
+            font-size: 12px;
+            padding: 1px 12px;
+            border-radius: 4px;
+            margin-right: 10px;
+        }}
         .empty {{ color: #5a3a3a; font-style: italic; font-size: 14px; padding: 20px; text-align: center; }}
-        .stats {{ margin-top: 20px; padding: 12px 18px; background: #121212; border-radius: 6px; border: 1px solid #2a0a0a; color: #7a5a5a; font-size: 13px; text-align: center; }}
+        .stats {{ margin-top: 20px; padding: 12px 20px; background: #0e0e0e; border-radius: 8px; border: 1px solid #1a0a0a; color: #7a4a4a; font-size: 13px; text-align: center; }}
         .footer {{ margin-top: 25px; padding-top: 16px; border-top: 1px solid #1a0a0a; font-size: 12px; color: #4a2a2a; text-align: center; }}
         .footer a {{ color: #7a3a3a; text-decoration: none; }}
         .footer a:hover {{ color: #aa5a5a; }}
-        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header {{ padding-left: 0; padding-top: 70px; }} .watermark {{ top: 10px; left: 15px; }} .watermark svg {{ width: 40px; height: 40px; }} .watermark .text {{ font-size: 10px; }} }}
+        @media (max-width: 600px) {{ .container {{ padding: 16px; }} .header {{ padding-left: 0; padding-top: 70px; }} .watermark {{ top: 10px; left: 15px; }} .watermark svg {{ width: 40px; height: 50px; }} .watermark .text {{ font-size: 10px; }} }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="watermark">
             <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <polygon points="50,8 8,88 92,88" stroke="#6a2a2a" stroke-width="3" fill="none"/>
-                <line x1="50" y1="8" x2="50" y2="88" stroke="#5a2a2a" stroke-width="1" stroke-dasharray="4,4"/>
-                <line x1="21" y1="68" x2="79" y2="68" stroke="#5a2a2a" stroke-width="1" stroke-dasharray="4,4"/>
-                <line x1="29" y1="48" x2="71" y2="48" stroke="#5a2a2a" stroke-width="1" stroke-dasharray="4,4"/>
-                <ellipse cx="50" cy="48" rx="14" ry="10" stroke="#6a2a2a" stroke-width="2" fill="none"/>
-                <circle cx="50" cy="48" r="4" stroke="#6a2a2a" stroke-width="2" fill="none"/>
-                <circle cx="50" cy="48" r="1.5" fill="#6a2a2a"/>
-                <circle cx="47" cy="45" r="2" fill="#6a2a2a" opacity="0.3"/>
+                <polygon points="50,5 5,90 95,90" stroke="#8a2a2a" stroke-width="2.5" fill="none"/>
+                <line x1="50" y1="5" x2="50" y2="90" stroke="#5a2a2a" stroke-width="0.8" stroke-dasharray="4,4"/>
+                <line x1="18" y1="70" x2="82" y2="70" stroke="#5a2a2a" stroke-width="0.8" stroke-dasharray="4,4"/>
+                <line x1="27" y1="50" x2="73" y2="50" stroke="#5a2a2a" stroke-width="0.8" stroke-dasharray="4,4"/>
+                <ellipse cx="50" cy="45" rx="15" ry="11" stroke="#d0d0d0" stroke-width="2" fill="none"/>
+                <circle cx="50" cy="45" r="4.5" stroke="#d0d0d0" stroke-width="1.8" fill="none"/>
+                <circle cx="50" cy="45" r="2" fill="#d0d0d0"/>
+                <circle cx="47" cy="42" r="2.5" fill="#d0d0d0" opacity="0.25"/>
             </svg>
             <div class="text">OTOB</div>
         </div>
@@ -728,14 +829,27 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 # ==================== МЕНЮ ====================
 
 def main_menu_keyboard():
+    """Главное меню — с зеркалом"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("🔍 Поиск", callback_data="global_search"),
+        types.InlineKeyboardButton("🔍 Функции", callback_data="menu_functions"),
         types.InlineKeyboardButton("🪞 Зеркало", callback_data="menu_mirror")
     )
     markup.add(
         types.InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"),
         types.InlineKeyboardButton("📊 Баланс", callback_data="menu_balance")
+    )
+    markup.add(
+        types.InlineKeyboardButton("❓ Помощь", callback_data="menu_help"),
+        types.InlineKeyboardButton("🧑‍💻 Разработчики", url="https://t.me/lkblyad")
+    )
+    return markup
+
+def functions_menu_keyboard():
+    """Меню функций — без зеркала"""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🌐 Глобальный поиск", callback_data="global_search")
     )
     markup.add(
         types.InlineKeyboardButton("📧 Email", callback_data="email_search"),
@@ -745,8 +859,7 @@ def main_menu_keyboard():
         types.InlineKeyboardButton("👤 Username", callback_data="username_search")
     )
     markup.add(
-        types.InlineKeyboardButton("❓ Помощь", callback_data="menu_help"),
-        types.InlineKeyboardButton("🧑‍💻 Разработчики", url="https://t.me/lkblyad")
+        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
     )
     return markup
 
@@ -761,14 +874,10 @@ def mirror_callback(call):
     if user.get("mirror_created", 0) > 0:
         bot.edit_message_text(
             f"🪞 *Зеркало уже создано!*\n\n"
-            f"📊 Вы уже создали копию бота и получили +2 поиска.\n"
-            f"📊 Ваш лимит: 5 поисков в день.\n\n"
-            f"📌 *Как получить ещё +1 поиск?*\n"
-            f"1. Отправьте ссылку на вашего бота друзьям\n"
-            f"2. Каждый, кто перейдёт по ссылке и запустит бота\n"
-            f"3. Вы получите +1 дополнительный поиск\n\n"
+            f"✅ Вы уже создали копию бота.\n"
+            f"📊 Ваш лимит: **5 поисков в день**.\n\n"
             f"👥 *Приглашено:* {user.get('mirror_refs', 0)} человек\n"
-            f"📊 *Бонусных поисков от приглашённых:* {user.get('mirror_refs', 0)}",
+            f"📊 *Бонусных поисков:* {user.get('mirror_refs', 0)}",
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",
@@ -779,7 +888,6 @@ def mirror_callback(call):
         )
         return
     
-    # Инструкция по созданию зеркала
     text = (
         "🪞 *Создание зеркала (копии) бота*\n\n"
         "📌 *Как создать копию OTOB:*\n\n"
@@ -793,8 +901,8 @@ def mirror_callback(call):
         "✅ После этого вы получите **+2 поиска**!\n"
         "📊 Ваш лимит станет **5 поисков в день**.\n\n"
         "📌 *Бонус за приглашения:*\n"
-        "За каждого человека, который перейдёт по вашей ссылке\n"
-        "и запустит вашего бота, вы получите **+1 поиск**!"
+        "За каждого человека, который запустит вашего бота,\n"
+        "вы получите **+1 поиск**!"
     )
     
     bot.edit_message_text(
@@ -829,7 +937,6 @@ def mirror_token_callback(call):
 def set_mirror_command(message):
     user_id = message.from_user.id
     
-    # Проверяем, не создал ли уже зеркало
     user = get_user(user_id)
     if user.get("mirror_created", 0) > 0:
         bot.reply_to(message, "🪞 Вы уже создали зеркало!")
@@ -847,18 +954,15 @@ def set_mirror_command(message):
     
     mirror_token = args[1].strip()
     
-    # Проверяем токен (пытаемся получить информацию о боте)
     try:
         import requests
         test_bot = telebot.TeleBot(mirror_token)
         test_bot.get_me()
         
-        # Токен рабочий — активируем зеркало
         user["mirror_created"] = 1
-        user["searches_extra"] += 2  # +2 поиска за создание зеркала
+        user["searches_extra"] += 2
         update_user(user_id, user)
         
-        # Сохраняем токен в отдельной таблице (для статистики)
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute('''
@@ -877,13 +981,11 @@ def set_mirror_command(message):
             f"🪞 *Зеркало успешно создано!*\n\n"
             f"✅ Токен валидный! Бот создан.\n"
             f"📊 Вы получили **+2 поиска**!\n"
-            f"📊 Теперь ваш лимит — **5 поисков в день**.\n\n"
+            f"📊 Ваш лимит — **5 поисков в день**.\n\n"
             f"🔗 Ваш бот: `@{test_bot.get_me().username}`\n\n"
             f"📌 *Как получить ещё +1 поиск?*\n"
-            f"1. Отправьте ссылку на вашего бота друзьям\n"
-            f"2. Каждый, кто перейдёт по ссылке и запустит бота\n"
-            f"3. Вы получите +1 дополнительный поиск\n\n"
-            f"👤 Приглашайте друзей и получайте больше поисков!",
+            f"• Отправьте ссылку на вашего бота друзьям\n"
+            f"• Каждый, кто запустит бота → +1 поиск",
             parse_mode="Markdown"
         )
         
@@ -907,11 +1009,29 @@ def back_callback(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
         "🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
+        "👋 Привет! Я помогу тебе найти информацию в открытых источниках.\n\n"
         "📌 *Выбери действие:*",
         call.message.chat.id,
         call.message.message_id,
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard()
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "menu_functions")
+def functions_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🔍 *Выбери функцию:*\n\n"
+        "📌 *Основной поиск:*\n"
+        "• 🌐 Глобальный поиск — номер, email, ФИО, IP\n\n"
+        "📌 *Быстрый поиск:*\n"
+        "• 📧 Email — проверка утечек\n"
+        "• 📱 Телефон — оператор, регион\n"
+        "• 👤 Username — поиск в соцсетях",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="Markdown",
+        reply_markup=functions_menu_keyboard()
     )
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu_profile")
@@ -922,17 +1042,19 @@ def profile_callback(call):
     remaining = get_remaining(user.id)
     max_searches = get_max_searches(user.id)
     text = (
-        f"👤 *Твой профиль*\n\n"
+        "👤 *Твой профиль*\n\n"
         f"🆔 ID: `{user.id}`\n"
         f"👤 Username: @{user.username or 'нет'}\n"
         f"📛 Имя: {user.first_name or '—'}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
         f"📊 *Лимит:* {max_searches} поисков в день\n"
-        f"🔍 Использовано сегодня: {user_data['searches_today']}/{max_searches}\n"
+        f"🔍 Использовано: {user_data['searches_today']}/{max_searches}\n"
         f"📊 Бонусных: {user_data['searches_extra']}\n"
         f"👥 Приглашено: {user_data.get('mirror_refs', 0)}\n"
         f"📊 Бонус от приглашений: {user_data.get('mirror_refs', 0)}\n"
         f"🪞 Зеркало: {'✅ Создано' if user_data.get('mirror_created', 0) > 0 else '❌ Не создано'}\n"
         f"📊 Осталось: {remaining}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
         f"⏰ Сброс: в 00:00 МСК\n"
         f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
     )
@@ -956,14 +1078,16 @@ def balance_callback(call):
     extra = get_user(user_id)["searches_extra"]
     refs = get_user(user_id).get("mirror_refs", 0)
     text = (
-        f"📊 *Твой баланс*\n\n"
+        "📊 *Твой баланс*\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
         f"📊 *Лимит:* {max_searches} поисков в день\n"
-        f"🔍 Использовано сегодня: {used}/{max_searches}\n"
-        f"📊 Бонусных запросов: {extra}\n"
+        f"🔍 Использовано: {used}/{max_searches}\n"
+        f"📊 Бонусных: {extra}\n"
         f"👥 Бонус от приглашений: {refs}\n"
         f"📊 Осталось: {remaining}\n"
         f"🪞 Зеркало: {'✅' if get_user(user_id).get('mirror_created', 0) > 0 else '❌'}\n"
-        f"⏰ Сброс: в 00:00 МСК\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ Сброс: в 00:00 МСК\n"
         f"👑 Админ: {'безлимитный' if user_id == ADMIN_ID else 'нет'}"
     )
     bot.edit_message_text(
@@ -993,7 +1117,7 @@ def help_callback(call):
         "• Каждый приглашённый даёт +1 поиск\n\n"
         "📊 *Лимит:* 3 + 2 (зеркало) + приглашения\n"
         "👑 *Админ:* безлимитный доступ\n\n"
-        "🧑‍💻 *Разработчики:* @lkblyad",
+        "🧑‍💻 *Канал разработчиков:* @lkblyad",
         call.message.chat.id,
         call.message.message_id,
         parse_mode="Markdown",
@@ -1029,7 +1153,11 @@ def email_search_callback(call):
     bot.edit_message_text(
         "📧 *Проверка email*\n\n"
         "Отправь email для проверки утечек.\n\n"
-        "Пример: user@example.com",
+        "Пример: user@example.com\n\n"
+        "🔍 Будут проверены:\n"
+        "• HaveIBeenPwned (утечки)\n"
+        "• EmailRep (репутация)\n"
+        "• XposedOrNot (утечки)",
         call.message.chat.id,
         call.message.message_id,
         parse_mode="Markdown",
@@ -1044,7 +1172,14 @@ def phone_search_callback(call):
     bot.edit_message_text(
         "📱 *Проверка телефона*\n\n"
         "Отправь номер для проверки.\n\n"
-        "Пример: +79991234567 или 79991234567",
+        "Пример: +79991234567 или 79991234567\n\n"
+        "🔍 Будут проверены:\n"
+        "• Numverify (страна, оператор)\n"
+        "• Veriphone (страна, тип)\n"
+        "• AbstractAPI (локация)\n"
+        "• BigDataCloud (геолокация)\n"
+        "• HLR (активность)\n"
+        "• Hudson Rock (утечки)",
         call.message.chat.id,
         call.message.message_id,
         parse_mode="Markdown",
@@ -1059,7 +1194,11 @@ def username_search_callback(call):
     bot.edit_message_text(
         "👤 *Поиск по username*\n\n"
         "Отправь никнейм для поиска в соцсетях.\n\n"
-        "Пример: username",
+        "Пример: username\n\n"
+        "🔍 Будут проверены:\n"
+        "• X-Ray.contact (соцсети)\n"
+        "• IDCrawl (соцсети)\n"
+        "• TruePeopleSearch (профили)",
         call.message.chat.id,
         call.message.message_id,
         parse_mode="Markdown",
@@ -1205,7 +1344,7 @@ def handle_text(message):
                 caption=f"📊 *OSINT-отчёт*\n\n"
                         f"🔍 Запрос: `{text}`\n"
                         f"📌 Найдено: **{total}** результатов\n"
-                        f"🔍 Осталось поисков: **{remaining}/{max_searches}**\n"
+                        f"🔍 Осталось: **{remaining}/{max_searches}**\n"
                         f"🪞 Зеркало: {'✅' if user_data.get('mirror_created', 0) > 0 else '❌'}\n"
                         f"👥 Приглашено: {user_data.get('mirror_refs', 0)}",
                 parse_mode="Markdown"

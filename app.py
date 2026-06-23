@@ -38,7 +38,7 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== БАЗА DАННЫХ ====================
+# ==================== БАЗА ДАННЫХ ====================
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -140,9 +140,9 @@ reports = {}
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
-bot.remove_webhook()
+bot.remove_webhook()  # Убираем вебхук, чтобы избежать 409
 
-# ==================== HTTP-СЕРВЕР ====================
+# ==================== HTTP-СЕРВЕР (С ПОДДЕРЖКОЙ HEAD) ====================
 
 class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -169,7 +169,17 @@ class ReportHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"Not found")
         except Exception as e:
-            logger.error(f"HTTP error: {e}")
+            logger.error(f"HTTP GET error: {e}")
+    
+    def do_HEAD(self):
+        """Render использует HEAD-запросы для проверки доступности"""
+        if self.path == '/' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def run_http_server():
     try:
@@ -196,11 +206,18 @@ def generate_otob_title(query: str, qtype: str) -> str:
     return random.choice(templates)
 
 def safe_request(func):
+    """Декоратор для безопасного выполнения запросов с обработкой всех ошибок"""
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
         except asyncio.TimeoutError:
             logger.warning(f"⏰ Таймаут в {func.__name__}")
+            return None
+        except aiohttp.ClientConnectorError as e:
+            logger.warning(f"🌐 Ошибка соединения в {func.__name__}: {e}")
+            return None
+        except aiohttp.ClientError as e:
+            logger.warning(f"🌐 HTTP ошибка в {func.__name__}: {e}")
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка в {func.__name__}: {e}")
@@ -224,25 +241,28 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== API ФУНКЦИИ (таймаут 30 секунд) ====================
+# ==================== API ФУНКЦИИ ====================
 
 @safe_request
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
         return None
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('valid'):
-                    return {
-                        "country": data.get('country_name', '—'),
-                        "location": data.get('location', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "line_type": data.get('line_type', '—')
-                    }
+    try:
+        clean = re.sub(r'\D', '', phone)
+        url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('valid'):
+                        return {
+                            "country": data.get('country_name', '—'),
+                            "location": data.get('location', '—'),
+                            "carrier": data.get('carrier', '—'),
+                            "line_type": data.get('line_type', '—')
+                        }
+    except:
+        pass
     return None
 
 @safe_request
@@ -450,7 +470,6 @@ async def whois_lookup(domain: str) -> dict:
 
 @safe_request
 async def ip_api_lookup(ip: str) -> dict:
-    """ip-api.com — бесплатно, без ключа, 45 запросов/мин"""
     url = f"http://ip-api.com/json/{ip}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=30) as resp:
@@ -468,7 +487,6 @@ async def ip_api_lookup(ip: str) -> dict:
 
 @safe_request
 async def github_username_lookup(username: str) -> dict:
-    """GitHub API — 60 запросов/час без ключа"""
     url = f"https://api.github.com/users/{username}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=30) as resp:
@@ -487,7 +505,6 @@ async def github_username_lookup(username: str) -> dict:
 
 @safe_request
 async def telegram_username_lookup(username: str) -> dict:
-    """Telegram API — проверка существования username"""
     try:
         url = f"https://t.me/{username}"
         async with aiohttp.ClientSession() as session:
@@ -502,7 +519,6 @@ async def telegram_username_lookup(username: str) -> dict:
 
 @safe_request
 async def zippopotam_lookup(postal_code: str, country: str = "RU") -> dict:
-    """zippopotam.us — бесплатно, без ключа"""
     url = f"https://api.zippopotam.us/{country}/{postal_code}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=30) as resp:

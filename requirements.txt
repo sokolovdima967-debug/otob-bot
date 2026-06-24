@@ -9,3 +9,4 @@ phonenumbers==8.13.0
 pytz==2024.1
 dnspython==2.6.1
 Brotli==1.1.0
+curl-cffi==0.8.0b6

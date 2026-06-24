@@ -20,6 +20,7 @@ import phonenumbers
 from phonenumbers import carrier, geocoder, timezone as phone_timezone
 import pytz
 import dns.resolver
+from curl_cffi import requests as curl_requests
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
@@ -252,133 +253,247 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== ДАРКНЕТ ИНСТРУМЕНТЫ ====================
+# ==================== НОВЫЙ ПАРСЕР С ОБХОДОМ БЛОКИРОВОК ====================
 
-async def ahmia_search(query: str) -> list:
-    """Поиск .onion сайтов через Ahmia (парсинг)"""
+async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) -> list:
+    """
+    Парсит сайт с имитацией браузера через curl_cffi (обход Cloudflare)
+    """
+    results = []
     try:
-        url = f"https://ahmia.fi/search/?q={query}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    results = []
-                    for item in soup.select('.result'):
-                        title = item.select_one('h4 a')
-                        desc = item.select_one('.description')
-                        if title:
-                            link = title.get('href')
-                            if link and not link.startswith('http'):
-                                link = f"https://ahmia.fi{link}"
-                            results.append({
-                                "title": title.get_text(strip=True)[:80] if title else "—",
-                                "link": link or "—",
-                                "text": desc.get_text(strip=True)[:200] if desc else "—"
-                            })
-                    return results
+        headers = {
+            "User-Agent": ua.random,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        
+        # Используем curl_cffi в отдельном потоке (синхронно, но не блокируем)
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: curl_requests.get(
+                url,
+                headers=headers,
+                impersonate="chrome110",
+                timeout=15,
+                verify=False
+            )
+        )
+        
+        if response.status_code == 200:
+            html = response.text
+            soup = BeautifulSoup(html, 'html5lib')
+            items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
+            for item in items[:max_results]:
+                title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
+                link_elem = item.select_one(selectors.get("link", "a"))
+                text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
+                extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
+                result = {
+                    "title": title_elem.get_text(strip=True) if title_elem else "—",
+                    "link": link_elem.get('href') if link_elem else None,
+                    "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
+                    "extra": extra_elem.get_text(strip=True) if extra_elem else None
+                }
+                if result["link"] and result["link"].startswith('/'):
+                    result["link"] = f"https://{url.split('/')[2]}{result['link']}"
+                if result["title"] != "—" or result["text"] != "—":
+                    results.append(result)
     except Exception as e:
-        logger.error(f"Ahmia error: {e}")
-    return []
+        logger.error(f"Parse error for {url}: {e}")
+    return results
 
-async def exonera_check(ip: str) -> dict:
-    """Проверка IP через Exonera Tor (база Tor-релеев)"""
+# ==================== НОВЫЕ ИНСТРУМЕНТЫ (БЕЗ КЛЮЧЕЙ) ====================
+
+# ----- 1. EPIEOS (соцсети по email/номеру) -----
+async def epieos_lookup(query: str) -> dict:
     try:
-        url = f"https://exonerator.torproject.org/api/?ip={ip}"
+        url = f"https://epieos.com/api/check?query={query}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return {
                         "found": True,
-                        "is_tor": data.get('is_tor', False),
-                        "first_seen": data.get('first_seen', '—'),
-                        "last_seen": data.get('last_seen', '—')
+                        "social": data.get('social', {}),
+                        "google": data.get('google', {}),
+                        "breaches": data.get('breaches', [])[:5]
                     }
-    except Exception as e:
-        logger.error(f"Exonera error: {e}")
+    except:
+        pass
     return {"found": False}
 
-async def darksearch_lookup(query: str) -> list:
-    """Поиск через DarkSearch API (публичный)"""
+# ----- 2. SYNC.ME (имя + спам) -----
+async def syncme_lookup(phone: str) -> dict:
     try:
-        url = f"https://darksearch.io/api/search?q={query}"
+        clean = clean_phone(phone)
+        url = f"https://sync.me/search?q={clean}"
+        return await parse_syncme_whoseno(url, "syncme")
+    except:
+        return {"found": False}
+
+# ----- 3. WHOSENO (имя владельца) -----
+async def whoseno_lookup(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://whoseno.com/search?q={clean}"
+        return await parse_syncme_whoseno(url, "whoseno")
+    except:
+        return {"found": False}
+
+# ----- 4. REVEALNAME (имя + оператор) -----
+async def revealname_lookup(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://revealname.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('results', [])[:5]
-    except Exception as e:
-        logger.error(f"DarkSearch error: {e}")
-    return []
-
-# ==================== INTELX (ДАРКНЕТ, УТЕЧКИ) ====================
-
-async def intelx_lookup(query: str) -> dict:
-    """IntelX — поиск в даркнете, утечки, Tor, I2P"""
-    if not INTELX_KEY:
-        return None
-    
-    try:
-        search_url = "https://2.intelx.io/phonebook/search"
-        headers = {"x-key": INTELX_KEY}
-        payload = {"term": query, "maxresults": 10, "media": 0}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(search_url, headers=headers, json=payload, timeout=10) as resp:
-                if resp.status != 200:
-                    return None
-                search_data = await resp.json()
-                search_id = search_data.get('id')
-                if not search_id:
-                    return None
-            
-            await asyncio.sleep(2)
-            result_url = f"https://2.intelx.io/phonebook/search/result?id={search_id}"
-            async with session.get(result_url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('totalResults', 0) > 0:
-                        return {
-                            "found": True,
-                            "total": data.get('totalResults', 0),
-                            "results": data.get('selectors', [])[:5]
-                        }
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|owner|result'))
+                    if name:
+                        return {"found": True, "name": name.get_text(strip=True)}
                 return {"found": False}
-    except Exception as e:
-        logger.error(f"IntelX error: {e}")
+    except:
         return {"found": False}
 
-# ==================== WHATCMS (ОПРЕДЕЛЕНИЕ CMS) ====================
-
-async def whatcms_lookup(domain: str) -> dict:
-    """WhatCMS — определяет CMS сайта (WordPress, Joomla, Drupal и др.)"""
-    if not WHATCMS_KEY:
-        return None
-    
+# ----- 5. LEAK-LOOKUP (утечки) -----
+async def leaklookup_lookup(query: str) -> dict:
     try:
-        url = f"https://whatcms.org/APIEndpoint?key={WHATCMS_KEY}&url={domain}"
+        url = f"https://leak-lookup.com/api/search?query={query}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data.get('result', {}).get('code') == 200:
-                        result = data.get('result', {})
+                    if data.get('found'):
                         return {
                             "found": True,
-                            "cms": result.get('name', '—'),
-                            "version": result.get('version', '—'),
-                            "cms_url": result.get('cms_url', '—'),
-                            "confidence": result.get('confidence', '—')
+                            "sources": data.get('sources', [])[:5]
                         }
+    except:
+        pass
+    return {"found": False}
+
+# ----- 6. NOIMOSINY (30+ сервисов) -----
+async def noimosiny_lookup(query: str) -> list:
+    try:
+        url = f"https://noimosiny.com/api/search?q={query}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('results', [])[:10]
+    except:
+        pass
+    return []
+
+# ----- 7. OSINT.INDUSTRIES (10+ соцсетей) -----
+async def osint_industries_lookup(query: str) -> list:
+    try:
+        url = f"https://osint.industries/api/search?q={query}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('results', [])[:10]
+    except:
+        pass
+    return []
+
+# ----- 8. X-RAY.CONTACT (с обходом через curl) -----
+async def xray_lookup(query: str) -> list:
+    try:
+        url = f"https://x-ray.contact/search?q={query}"
+        selectors = {
+            "result": ".result-item, .social-link, .profile-item",
+            "title": ".title, .name",
+            "link": "a",
+            "text": ".description",
+            "extra": ".extra"
+        }
+        return await parse_site_with_curl(url, selectors, 5)
+    except:
+        return []
+
+# ----- 9. TRUEPEOPLESEARCH (с обходом через curl) -----
+async def truepeoplesearch_lookup(query: str) -> list:
+    try:
+        if re.search(r'\d', query):
+            url = f"https://truepeoplesearch.com/results?phoneno={query}"
+        else:
+            url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
+        selectors = {
+            "result": ".card, .person-item",
+            "title": ".name, .title",
+            "text": ".description",
+            "extra": ".address, .phone, .relatives"
+        }
+        return await parse_site_with_curl(url, selectors, 5)
+    except:
+        return []
+
+# ----- 10. FASTPEOPLESEARCH (с обходом через curl) -----
+async def fastpeoplesearch_lookup(phone: str) -> list:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://www.fastpeoplesearch.com/phone/{clean}"
+        selectors = {
+            "result": ".result, .person-item",
+            "title": ".name, .title",
+            "text": ".description",
+            "extra": ".address"
+        }
+        return await parse_site_with_curl(url, selectors, 5)
+    except:
+        return []
+
+# ----- 11. THATSTHEM (с обходом через curl) -----
+async def thatsthem_lookup(phone: str) -> list:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://thatsthem.com/phone/{clean}"
+        selectors = {
+            "result": ".result, .person, .card",
+            "title": ".name, .fullname",
+            "text": ".address, .location",
+            "extra": ".age, .relatives, .phone"
+        }
+        return await parse_site_with_curl(url, selectors, 5)
+    except:
+        return []
+
+# ==================== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ SYNC.ME / WHOSENO ====================
+
+async def parse_syncme_whoseno(url: str, source: str) -> dict:
+    try:
+        headers = {"User-Agent": ua.random}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|title'))
+                    if source == "syncme":
+                        spam = soup.find('span', class_=re.compile('spam|risk'))
+                        return {
+                            "found": True if name else False,
+                            "name": name.get_text(strip=True) if name else "—",
+                            "spam_level": spam.get_text(strip=True) if spam else "—"
+                        }
+                    return {
+                        "found": True if name else False,
+                        "name": name.get_text(strip=True) if name else "—"
+                    }
                 return {"found": False}
-    except Exception as e:
-        logger.error(f"WhatCMS error: {e}")
+    except:
         return {"found": False}
 
-# ==================== ОСНОВНЫЕ ФУНКЦИИ ПОИСКА ====================
+# ==================== ОСТАЛЬНЫЕ ФУНКЦИИ ПОИСКА (СТАРЫЕ) ====================
 
 # ----- PHONENUMBERS -----
 async def phonenumbers_info(phone: str) -> dict:
@@ -638,54 +753,25 @@ async def dehashed_lookup(query: str) -> dict:
 async def ddg_search(query: str) -> list:
     url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_with_curl(url, selectors, 5)
 
 # ----- SOCIALSEARCH -----
 async def socialsearch_lookup(query: str) -> list:
     url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_with_curl(url, selectors, 5)
 
 # ----- PIPL -----
 async def pipl_lookup(query: str) -> list:
     url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
-    return await parse_site(url, selectors, 5)
-
-# ----- X-RAY -----
-async def xray_lookup(query: str) -> list:
-    url = f"https://x-ray.contact/search?q={query}"
-    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_with_curl(url, selectors, 5)
 
 # ----- IDCRAWL -----
 async def idcrawl_lookup(query: str) -> list:
     url = f"https://idcrawl.com/{query}"
     selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 5)
-
-# ----- TRUEPEOPLESEARCH -----
-async def truepeoplesearch_lookup(query: str) -> list:
-    if re.search(r'\d', query):
-        url = f"https://truepeoplesearch.com/results?phoneno={query}"
-    else:
-        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
-    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
-    return await parse_site(url, selectors, 5)
-
-# ----- FASTPEOPLESEARCH -----
-async def fastpeoplesearch_parse(phone: str) -> list:
-    clean = clean_phone(phone)
-    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-# ----- THATSTHEM -----
-async def thatsthem_lookup(phone: str) -> list:
-    clean = clean_phone(phone)
-    url = f"https://thatsthem.com/phone/{clean}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
-    return await parse_site(url, selectors, 5)
+    return await parse_site_with_curl(url, selectors, 5)
 
 # ----- WHITEPAGES -----
 async def whitepages_check(phone: str) -> dict:
@@ -698,23 +784,6 @@ async def whitepages_check(phone: str) -> dict:
                     html = await resp.text()
                     if "No results found" not in html:
                         return {"found": True}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- REVEALNAME -----
-async def revealname_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://revealname.com/phone/{clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=8) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|owner|result'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
                 return {"found": False}
     except:
         return {"found": False}
@@ -834,43 +903,107 @@ async def dns_enum(domain: str) -> list:
     except:
         return []
 
-# ==================== ПАРСЕР ====================
-
-async def parse_site(url: str, selectors: dict, max_results: int = 5) -> list:
-    headers = {
-        "User-Agent": ua.random,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-    results = []
+# ----- AHMIA -----
+async def ahmia_search(query: str) -> list:
     try:
+        url = f"https://ahmia.fi/search/?q={query}"
+        headers = {"User-Agent": ua.random}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     soup = BeautifulSoup(html, 'html5lib')
-                    items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
-                    for item in items[:max_results]:
-                        title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
-                        link_elem = item.select_one(selectors.get("link", "a"))
-                        text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
-                        extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
-                        result = {
-                            "title": title_elem.get_text(strip=True) if title_elem else "—",
-                            "link": link_elem.get('href') if link_elem else None,
-                            "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
-                            "extra": extra_elem.get_text(strip=True) if extra_elem else None
-                        }
-                        if result["link"] and result["link"].startswith('/'):
-                            result["link"] = f"https://{url.split('/')[2]}{result['link']}"
-                        if result["title"] != "—" or result["text"] != "—":
-                            results.append(result)
+                    results = []
+                    for item in soup.select('.result'):
+                        title = item.select_one('h4 a')
+                        desc = item.select_one('.description')
+                        if title:
+                            link = title.get('href')
+                            if link and not link.startswith('http'):
+                                link = f"https://ahmia.fi{link}"
+                            results.append({
+                                "title": title.get_text(strip=True)[:80] if title else "—",
+                                "link": link or "—",
+                                "text": desc.get_text(strip=True)[:200] if desc else "—"
+                            })
+                    return results
     except Exception as e:
-        logger.error(f"Parse error for {url}: {e}")
-    return results
+        logger.error(f"Ahmia error: {e}")
+    return []
+
+# ----- EXONERA TOR -----
+async def exonera_check(ip: str) -> dict:
+    try:
+        url = f"https://exonerator.torproject.org/api/?ip={ip}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {
+                        "found": True,
+                        "is_tor": data.get('is_tor', False),
+                        "first_seen": data.get('first_seen', '—'),
+                        "last_seen": data.get('last_seen', '—')
+                    }
+    except Exception as e:
+        logger.error(f"Exonera error: {e}")
+    return {"found": False}
+
+# ----- INTELX -----
+async def intelx_lookup(query: str) -> dict:
+    if not INTELX_KEY:
+        return None
+    try:
+        search_url = "https://2.intelx.io/phonebook/search"
+        headers = {"x-key": INTELX_KEY}
+        payload = {"term": query, "maxresults": 10, "media": 0}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(search_url, headers=headers, json=payload, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                search_data = await resp.json()
+                search_id = search_data.get('id')
+                if not search_id:
+                    return None
+            await asyncio.sleep(2)
+            result_url = f"https://2.intelx.io/phonebook/search/result?id={search_id}"
+            async with session.get(result_url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('totalResults', 0) > 0:
+                        return {
+                            "found": True,
+                            "total": data.get('totalResults', 0),
+                            "results": data.get('selectors', [])[:5]
+                        }
+                return {"found": False}
+    except Exception as e:
+        logger.error(f"IntelX error: {e}")
+        return {"found": False}
+
+# ----- WHATCMS -----
+async def whatcms_lookup(domain: str) -> dict:
+    if not WHATCMS_KEY:
+        return None
+    try:
+        url = f"https://whatcms.org/APIEndpoint?key={WHATCMS_KEY}&url={domain}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('result', {}).get('code') == 200:
+                        result = data.get('result', {})
+                        return {
+                            "found": True,
+                            "cms": result.get('name', '—'),
+                            "version": result.get('version', '—'),
+                            "cms_url": result.get('cms_url', '—'),
+                            "confidence": result.get('confidence', '—')
+                        }
+                return {"found": False}
+    except Exception as e:
+        logger.error(f"WhatCMS error: {e}")
+        return {"found": False}
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
@@ -890,7 +1023,9 @@ async def global_lookup(query: str) -> dict:
     tasks = []
     
     if qtype == "phone":
+        clean = clean_phone(query)
         tasks = [
+            # ====== ОСНОВНЫЕ ======
             ("phonenumbers", run_with_timeout(phonenumbers_info(query), 8)),
             ("whatsapp", run_with_timeout(whatsapp_check(query), 6)),
             ("telegram", run_with_timeout(telegram_check(query), 6)),
@@ -899,23 +1034,35 @@ async def global_lookup(query: str) -> dict:
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
             ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 8)),
             ("dehashed", run_with_timeout(dehashed_lookup(query), 8)),
-            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 8)),
-            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 6)),
-            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 6)),
-            ("whitepages", run_with_timeout(whitepages_check(query), 6)),
-            ("revealname", run_with_timeout(revealname_check(query), 6)),
-            ("callerid", run_with_timeout(callerid_check(query), 6)),
-            ("spydialer", run_with_timeout(spydialer_check(query), 6)),
-            ("usphonebook", run_with_timeout(usphonebook_check(query), 6)),
-            ("fouroneone", run_with_timeout(fouroneone_check(query), 6)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
-            ("xray", run_with_timeout(xray_lookup(query), 6)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
-            ("google_dorks", run_with_timeout(google_dorks_search(query), 8)),
+            
+            # ====== НОВЫЕ ИНСТРУМЕНТЫ ======
+            ("syncme", run_with_timeout(syncme_lookup(query), 8)),
+            ("whoseno", run_with_timeout(whoseno_lookup(query), 8)),
+            ("revealname", run_with_timeout(revealname_lookup(query), 8)),
+            ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
+            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
+            ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
+            ("epieos", run_with_timeout(epieos_lookup(query), 10)),
+            
+            # ====== ПАРСЕРЫ С ОБХОДОМ ======
+            ("xray", run_with_timeout(xray_lookup(query), 10)),
+            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 10)),
+            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_lookup(query), 10)),
+            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 10)),
+            ("whitepages", run_with_timeout(whitepages_check(query), 8)),
+            ("callerid", run_with_timeout(callerid_check(query), 8)),
+            ("spydialer", run_with_timeout(spydialer_check(query), 8)),
+            ("usphonebook", run_with_timeout(usphonebook_check(query), 8)),
+            ("fouroneone", run_with_timeout(fouroneone_check(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 8)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 8)),
+            ("google_dorks", run_with_timeout(google_dorks_search(query), 10)),
+            
+            # ====== ДАРКНЕТ ======
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
-            ("darksearch", run_with_timeout(darksearch_lookup(query), 10)),
+            ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
     
     elif qtype == "email":
@@ -925,21 +1072,28 @@ async def global_lookup(query: str) -> dict:
             ("hibp", run_with_timeout(hibp_lookup(query), 8)),
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
             ("dehashed", run_with_timeout(dehashed_lookup(query), 8)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("epieos", run_with_timeout(epieos_lookup(query), 10)),
+            ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
+            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
+            ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
     
     elif qtype == "username":
         tasks = [
-            ("xray", run_with_timeout(xray_lookup(query), 6)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("xray", run_with_timeout(xray_lookup(query), 10)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 8)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
+            ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
+            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
+            ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
@@ -950,21 +1104,23 @@ async def global_lookup(query: str) -> dict:
             ("ip_api", run_with_timeout(ip_api_lookup(query), 6)),
             ("shodan", run_with_timeout(shodan_lookup(query), 8)),
             ("exonera", run_with_timeout(exonera_check(query), 8)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
         ]
     
     elif qtype == "domain":
         tasks = [
             ("virustotal", run_with_timeout(virustotal_lookup(query), 8)),
             ("dns_enum", run_with_timeout(dns_enum(query), 8)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
-            ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("whatcms", run_with_timeout(whatcms_lookup(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("ahmia", run_with_timeout(ahmia_search(query), 12)),
         ]
     else:
         tasks = [
-            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
+            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
     
@@ -1173,7 +1329,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             <div>
                 <h1>👁️ Глаз Исиды <span>OSINT</span></h1>
                 <div class="sub">⚡ Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
-                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 35+ источников · Глубокий OSINT · Даркнет</div>
+                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 45+ источников · Глубокий OSINT · Даркнет</div>
             </div>
             <div><span class="badge">🎯 НАЙДЕНО: {total}</span></div>
         </div>
@@ -1304,7 +1460,7 @@ def callback_handler(call):
             bot.edit_message_text(
                 "👁️ *Глаз Исиды — OSINT*\n\n"
                 "🕵️ *Глубокий OSINT-поиск*\n"
-                "35+ источников\n"
+                "45+ источников\n"
                 "ФИО · Адреса · Утечки · Соцсети · Даркнет\n\n"
                 "⚡ *Выбери действие:*",
                 call.message.chat.id,
@@ -1372,7 +1528,6 @@ def callback_handler(call):
                 "• Глобальный поиск — всё в одном запросе\n\n"
                 "🧅 *Даркнет:*\n"
                 "• Ahmia — поиск .onion сайтов\n"
-                "• DarkSearch — поиск в даркнете\n"
                 "• Exonera Tor — проверка IP в сети Tor\n"
                 "• IntelX — утечки, Tor, I2P\n\n"
                 "📊 *Лимит:* 5 поисков в день (сброс в 00:00 МСК)\n"
@@ -1398,9 +1553,9 @@ def callback_handler(call):
                 "• 🆔 Никнейм: `username`\n"
                 "• 🌐 IP: `8.8.8.8`\n"
                 "• 🌍 Домен: `example.com`\n\n"
-                "⚡ *35+ OSINT-источников*\n"
+                "⚡ *45+ OSINT-источников*\n"
                 "🕵️ ФИО · Адреса · Утечки · Соцсети\n"
-                "🧅 Даркнет: Ahmia · DarkSearch · Exonera Tor · IntelX",
+                "🧅 Даркнет: Ahmia · Exonera Tor · IntelX",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1489,8 +1644,8 @@ def start_command(message):
             f"👁️ *Глаз Исиды — OSINT*\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
             f"⚡ Глубокий OSINT-поиск\n"
-            f"🛡️ 35+ источников\n"
-            f"🧅 Даркнет: Ahmia · DarkSearch · Exonera · IntelX\n\n"
+            f"🛡️ 45+ источников\n"
+            f"🧅 Даркнет: Ahmia · Exonera · IntelX\n\n"
             f"📊 *Осталось:* {remaining}/5\n\n"
             f"📌 *Выбери действие:*",
             parse_mode="Markdown",
@@ -1580,7 +1735,7 @@ def handle_text(message):
             message,
             "👁️ *Глаз Исиды — глубокое сканирование...*\n"
             "⏱️ Время: до 90 секунд\n"
-            "🕵️ 35+ источников...\n"
+            "🕵️ 45+ источников...\n"
             "🧅 Поиск в даркнете...",
             parse_mode="Markdown"
         )
@@ -1634,7 +1789,7 @@ def handle_text(message):
                         f"📌 Найдено: **{total}**\n"
                         f"🔍 Осталось: **{remaining}/5**\n"
                         f"⏱️ Время: **{elapsed:.1f} сек**\n"
-                        f"🧅 Даркнет: Ahmia · DarkSearch · IntelX\n"
+                        f"🧅 Даркнет: Ahmia · Exonera Tor · IntelX\n"
                         f"🛡️ @Arhapov",
                 parse_mode="Markdown"
             )
@@ -1656,8 +1811,9 @@ if __name__ == "__main__":
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
     logger.info("🛡️ Канал: @Arhapov")
     logger.info("⚡ Таймаут поиска: 90 секунд")
-    logger.info("📊 35+ источников: ФИО · Адреса · Утечки · Соцсети")
-    logger.info("🧅 Даркнет: Ahmia · DarkSearch · Exonera Tor · IntelX · WhatCMS")
+    logger.info("📊 45+ источников: ФИО · Адреса · Утечки · Соцсети")
+    logger.info("🧅 Даркнет: Ahmia · Exonera Tor · IntelX · WhatCMS")
+    logger.info("🔄 Обход блокировок: curl_cffi (Chrome имитация)")
     logger.info("👁️ С поддержкой Архапова")
     
     try:

@@ -8,3 +8,4 @@ fake-useragent==1.4.0
 phonenumbers==8.13.0
 pytz==2024.1
 dnspython==2.6.1
+Brotli==1.1.0

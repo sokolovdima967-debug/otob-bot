@@ -228,8 +228,8 @@ def safe_request(func):
             return None
     return wrapper
 
-async def run_with_timeout(coro, timeout=10):
-    """Запускает корутину с таймаутом (по умолчанию 10 секунд)"""
+async def run_with_timeout(coro, timeout=12):
+    """Запускает корутину с таймаутом (по умолчанию 12 секунд)"""
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
@@ -254,6 +254,45 @@ def clean_phone(phone: str) -> str:
     """Очищает номер телефона от лишних символов"""
     return re.sub(r'\D', '', phone)
 
+def _has_useful_data(item: dict) -> bool:
+    """Проверяет, есть ли в словаре полезные данные"""
+    if not item:
+        return False
+    
+    # Если есть found: True — точно показываем
+    if item.get('found') is True:
+        return True
+    
+    # Если есть exists: True — показываем
+    if item.get('exists') is True:
+        return True
+    
+    # Если есть total > 0 — показываем
+    if item.get('total', 0) > 0:
+        return True
+    
+    # Проверяем наличие полезных полей
+    useful_fields = ['name', 'names', 'carrier', 'operator', 'country', 'region', 
+                     'status', 'spam_risk', 'password', 'hash', 'sources', 'breaches',
+                     'country_code', 'timezone', 'valid', 'possible']
+    
+    for field in useful_fields:
+        value = item.get(field)
+        if value and value != '—' and value != '':
+            return True
+    
+    # Проверяем title и text
+    title = item.get('title', '')
+    text = item.get('text', '')
+    if title and title != '—' and title != '':
+        return True
+    if text and text != '—' and text != '':
+        return True
+    if item.get('extra') and item.get('extra') != '—':
+        return True
+    
+    return False
+
 # ==================== ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ====================
 def detect_query_type(query: str) -> str:
     query = query.strip()
@@ -271,19 +310,17 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== НЕЛЕГАЛЬНЫЕ/БЕСПЛАТНЫЕ ИНСТРУМЕНТЫ (БЕЗ КЛЮЧЕЙ) ====================
+# ==================== ВСЕ ФУНКЦИИ ПОИСКА (БЕЗ КЛЮЧЕЙ) ====================
 
-# ----- 1. PHONENUMBERS (библиотека) -----
+# ----- 1. PHONENUMBERS -----
 async def phonenumbers_info(phone: str) -> dict:
-    """Информация о номере через библиотеку phonenumbers (без ключей)"""
     try:
         clean = clean_phone(phone)
         if len(clean) < 7:
             return None
-        
         parsed = phonenumbers.parse(f"+{clean}" if not clean.startswith('+') else clean, None)
-        
-        result = {
+        return {
+            "found": True,
             "country": geocoder.country_name_for_number(parsed, "ru") or "—",
             "region": geocoder.description_for_number(parsed, "ru") or "—",
             "carrier": carrier.name_for_number(parsed, "ru") or "—",
@@ -293,54 +330,49 @@ async def phonenumbers_info(phone: str) -> dict:
             "country_code": parsed.country_code,
             "national_number": parsed.national_number,
         }
-        return result
     except Exception as e:
         logger.error(f"Phonenumbers error: {e}")
         return None
 
-# ----- 2. WHATSAPP CHECK -----
+# ----- 2. WHATSAPP -----
 async def whatsapp_check(phone: str) -> dict:
-    """Проверка наличия в WhatsApp"""
     try:
         clean = clean_phone(phone)
         url = f"https://wa.me/{clean}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10, allow_redirects=False) as resp:
                 if resp.status == 200 or resp.status == 302:
-                    return {"exists": True, "url": f"https://wa.me/{clean}"}
-                return {"exists": False}
+                    return {"found": True, "exists": True, "url": f"https://wa.me/{clean}"}
+                return {"found": False, "exists": False}
     except:
-        return {"exists": False}
+        return {"found": False, "exists": False}
 
-# ----- 3. TELEGRAM CHECK -----
+# ----- 3. TELEGRAM -----
 async def telegram_phone_check(phone: str) -> dict:
-    """Проверка наличия в Telegram"""
     try:
         clean = clean_phone(phone)
         url = f"https://t.me/+{clean}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10, allow_redirects=False) as resp:
                 if resp.status == 200 or resp.status == 302:
-                    return {"exists": True, "url": f"https://t.me/+{clean}"}
-                return {"exists": False}
+                    return {"found": True, "exists": True, "url": f"https://t.me/+{clean}"}
+                return {"found": False, "exists": False}
     except:
-        return {"exists": False}
+        return {"found": False, "exists": False}
 
-# ----- 4. VIBER CHECK -----
+# ----- 4. VIBER -----
 async def viber_check(phone: str) -> dict:
-    """Проверка наличия в Viber"""
     try:
         clean = clean_phone(phone)
         url = f"https://www.viber.com/{clean}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10, allow_redirects=False) as resp:
-                return {"exists": resp.status == 200}
+                return {"found": resp.status == 200, "exists": resp.status == 200}
     except:
-        return {"exists": False}
+        return {"found": False, "exists": False}
 
-# ----- 5. TRUE CALLER (публичный парсинг) -----
+# ----- 5. TRUECALLER -----
 async def truecaller_check(phone: str) -> dict:
-    """Проверка в Truecaller (парсинг)"""
     try:
         clean = clean_phone(phone)
         url = f"https://www.truecaller.com/search/{clean}"
@@ -357,9 +389,8 @@ async def truecaller_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 6. GETCONTACT (публичный парсинг) -----
+# ----- 6. GETCONTACT -----
 async def getcontact_check(phone: str) -> dict:
-    """Проверка в GetContact"""
     try:
         clean = clean_phone(phone)
         url = f"https://www.getcontact.com/ru/search/{clean}"
@@ -376,9 +407,8 @@ async def getcontact_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 7. SPAM CALLS -----
+# ----- 7. SPAMCALLS -----
 async def spamcalls_check(phone: str) -> dict:
-    """Проверка спам-риска через spamcalls.net"""
     try:
         clean = clean_phone(phone)
         url = f"https://spamcalls.net/ru/number/{clean}"
@@ -388,32 +418,27 @@ async def spamcalls_check(phone: str) -> dict:
                 if resp.status == 200:
                     html = await resp.text()
                     if "спам" in html.lower() or "мошенник" in html.lower():
-                        return {"spam_risk": "high", "found": True}
+                        return {"found": True, "spam_risk": "high"}
                     elif "не спам" in html.lower():
-                        return {"spam_risk": "low", "found": True}
-                    return {"spam_risk": "unknown", "found": False}
-                return {"spam_risk": "unknown", "found": False}
+                        return {"found": True, "spam_risk": "low"}
+                return {"found": False, "spam_risk": "unknown"}
     except:
-        return {"spam_risk": "unknown", "found": False}
+        return {"found": False, "spam_risk": "unknown"}
 
-# ----- 8. GOOGLE DORKS (через DuckDuckGo) -----
+# ----- 8. GOOGLE DORKS -----
 async def google_dorks_search(query: str) -> list:
-    """Поиск через Google Dorks"""
     results = []
     dorks = [
         f'"{query}" phone',
         f'"{query}" contact',
         f'"{query}" "номер телефона"',
-        f'"{query}" tel:',
         f'site:facebook.com "{query}"',
         f'site:instagram.com "{query}"',
         f'site:vk.com "{query}"',
-        f'site:linkedin.com "{query}"',
         f'site:truecaller.com "{query}"',
         f'site:getcontact.com "{query}"',
     ]
-    
-    for dork in dorks[:5]:
+    for dork in dorks[:4]:
         try:
             url = f"https://html.duckduckgo.com/html/?q={dork.replace(' ', '+')}"
             headers = {"User-Agent": ua.random}
@@ -426,16 +451,14 @@ async def google_dorks_search(query: str) -> list:
                         for snippet in snippets[:2]:
                             text = snippet.get_text(strip=True)[:200]
                             if text and len(text) > 10:
-                                results.append({"title": dork, "text": text})
+                                results.append({"title": dork, "text": text, "found": True})
         except:
             continue
-    
     return results
 
-# ----- 9. LEAKCHECK (публичный API) -----
+# ----- 9. LEAKCHECK -----
 @safe_request
 async def leakcheck_lookup(query: str) -> dict:
-    """LeakCheck.io — база утечек (бесплатный публичный API)"""
     url = f"https://leakcheck.io/api/public?check={query}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=10) as resp:
@@ -450,10 +473,9 @@ async def leakcheck_lookup(query: str) -> dict:
                     }
     return {"found": False}
 
-# ----- 10. HUDSON ROCK (бесплатный) -----
+# ----- 10. HUDSON ROCK -----
 @safe_request
 async def hudsonrock_lookup(phone: str) -> dict:
-    """Hudson Rock — база утечек (бесплатный)"""
     clean = clean_phone(phone)
     url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
     async with aiohttp.ClientSession() as session:
@@ -466,11 +488,41 @@ async def hudsonrock_lookup(phone: str) -> dict:
                         "total": data.get('total_results', 0),
                         "breaches": data.get('results', [])[:5]
                     }
-    return None
+    return {"found": False}
 
-# ----- 11. WHITEPAGES (публичный парсинг) -----
+# ----- 11. HTMLWEB -----
+@safe_request
+async def htmlweb_lookup(phone: str) -> dict:
+    clean = clean_phone(phone)
+    url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data:
+                    return {
+                        "found": True,
+                        "country": data.get('country', '—'),
+                        "operator": data.get('operator', '—'),
+                        "region": data.get('region', '—'),
+                        "timezone": data.get('timezone', '—')
+                    }
+    return {"found": False}
+
+# ----- 12. SMSC HLR -----
+@safe_request
+async def hlr_lookup(phone: str) -> dict:
+    clean = clean_phone(phone)
+    url = f"https://smsc.ru/testhlr.php?phone={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.text()
+                return {"found": True, "status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
+    return {"found": False}
+
+# ----- 13. WHITEPAGES -----
 async def whitepages_check(phone: str) -> dict:
-    """Проверка в Whitepages"""
     try:
         clean = clean_phone(phone)
         url = f"https://www.whitepages.com/phone/{clean}"
@@ -485,9 +537,8 @@ async def whitepages_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 12. FASTPEOPLESEARCH (публичный парсинг) -----
+# ----- 14. FASTPEOPLESEARCH -----
 async def fastpeoplesearch_check(phone: str) -> dict:
-    """Проверка в FastPeopleSearch"""
     try:
         clean = clean_phone(phone)
         url = f"https://www.fastpeoplesearch.com/phone/{clean}"
@@ -504,9 +555,8 @@ async def fastpeoplesearch_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 13. THETHEM (публичный парсинг) -----
+# ----- 15. THATSTHEM -----
 async def thatsthem_check(phone: str) -> dict:
-    """Проверка в ThatsThem"""
     try:
         clean = clean_phone(phone)
         url = f"https://thatsthem.com/phone/{clean}"
@@ -523,9 +573,8 @@ async def thatsthem_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 14. REVEAL NAME (публичный парсинг) -----
+# ----- 16. REVEALNAME -----
 async def revealname_check(phone: str) -> dict:
-    """Проверка в RevealName"""
     try:
         clean = clean_phone(phone)
         url = f"https://revealname.com/phone/{clean}"
@@ -542,9 +591,8 @@ async def revealname_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 15. CALLER ID (публичный парсинг) -----
+# ----- 17. CALLERID -----
 async def callerid_check(phone: str) -> dict:
-    """Проверка в CallerID"""
     try:
         clean = clean_phone(phone)
         url = f"https://callerid.com/phone/{clean}"
@@ -561,9 +609,8 @@ async def callerid_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 16. SPYDIALER (публичный парсинг) -----
+# ----- 18. SPYDIALER -----
 async def spydialer_check(phone: str) -> dict:
-    """Проверка в SpyDialer"""
     try:
         clean = clean_phone(phone)
         url = f"https://www.spydialer.com/phone/{clean}"
@@ -578,9 +625,8 @@ async def spydialer_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 17. USPHONEBOOK (публичный парсинг) -----
+# ----- 19. USPHONEBOOK -----
 async def usphonebook_check(phone: str) -> dict:
-    """Проверка в USPhoneBook"""
     try:
         clean = clean_phone(phone)
         url = f"https://www.usphonebook.com/phone/{clean}"
@@ -597,9 +643,8 @@ async def usphonebook_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 18. SYNC.ME (публичный парсинг) -----
+# ----- 20. SYNC.ME -----
 async def syncme_check(phone: str) -> dict:
-    """Проверка в Sync.me"""
     try:
         clean = clean_phone(phone)
         url = f"https://sync.me/search?q={clean}"
@@ -614,9 +659,8 @@ async def syncme_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 19. WHOSENO (публичный парсинг) -----
+# ----- 21. WHOSENO -----
 async def whoseno_check(phone: str) -> dict:
-    """Проверка в WhoSeNo"""
     try:
         clean = clean_phone(phone)
         url = f"https://whoseno.com/search?q={clean}"
@@ -633,67 +677,37 @@ async def whoseno_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 20. HTMLWEB (без ключа) -----
-@safe_request
-async def htmlweb_lookup(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data:
-                    return {
-                        "country": data.get('country', '—'),
-                        "operator": data.get('operator', '—'),
-                        "region": data.get('region', '—'),
-                        "timezone": data.get('timezone', '—')
-                    }
-    return None
-
-# ----- 21. SMSC HLR (без ключа) -----
-@safe_request
-async def hlr_lookup(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://smsc.ru/testhlr.php?phone={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.text()
-                return {"status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
-    return None
-
 # ----- 22. DUCKDUCKGO (парсинг) -----
 async def duckduckgo_search(query: str) -> list:
     url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
     return await parse_site(url, selectors, 5)
 
-# ----- 23. SOCIALSEARCH (парсинг) -----
+# ----- 23. SOCIALSEARCH -----
 async def socialsearch_lookup(query: str) -> list:
     url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
     return await parse_site(url, selectors, 5)
 
-# ----- 24. PIPL (парсинг) -----
+# ----- 24. PIPL -----
 async def pipl_lookup(query: str) -> list:
     url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
     return await parse_site(url, selectors, 5)
 
-# ----- 25. X-RAY (парсинг) -----
+# ----- 25. X-RAY -----
 async def xray_lookup(query: str) -> list:
     url = f"https://x-ray.contact/search?q={query}"
     selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
     return await parse_site(url, selectors, 5)
 
-# ----- 26. IDCRAWL (парсинг) -----
+# ----- 26. IDCRAWL -----
 async def idcrawl_lookup(query: str) -> list:
     url = f"https://idcrawl.com/{query}"
     selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
     return await parse_site(url, selectors, 5)
 
-# ----- 27. TRUEPEOPLESEARCH (парсинг) -----
+# ----- 27. TRUEPEOPLESEARCH -----
 async def truepeoplesearch_lookup(query: str) -> list:
     if re.search(r'\d', query):
         url = f"https://truepeoplesearch.com/results?phoneno={query}"
@@ -759,7 +773,67 @@ async def parse_site(url: str, selectors: dict, max_results: int = 5) -> list:
         logger.error(f"Parse error for {url}: {e}")
     return results
 
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК (2 МИНУТЫ) ====================
+# ==================== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+@safe_request
+async def ipinfo_lookup(ip: str) -> dict:
+    url = f"https://ipinfo.io/{ip}/json"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "country": data.get('country', '—'),
+                    "city": data.get('city', '—'),
+                    "region": data.get('region', '—'),
+                    "org": data.get('org', '—')
+                }
+    return {"found": False}
+
+@safe_request
+async def ip_api_lookup(ip: str) -> dict:
+    url = f"http://ip-api.com/json/{ip}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('status') == 'success':
+                    return {
+                        "found": True,
+                        "country": data.get('country', '—'),
+                        "city": data.get('city', '—'),
+                        "region": data.get('regionName', '—'),
+                        "isp": data.get('isp', '—'),
+                        "asn": data.get('as', '—')
+                    }
+    return {"found": False}
+
+async def crtsh_lookup(domain: str) -> list:
+    url = f"https://crt.sh/?q={domain}&output=json"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data:
+                    return [{"domain": item.get('name_value', '—')} for item in data[:5]]
+    return []
+
+async def whois_lookup(domain: str) -> dict:
+    url = f"https://api.whois.vu/?q={domain}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "registrar": data.get('registrar', '—'),
+                    "creation_date": data.get('creation_date', '—'),
+                    "expiration_date": data.get('expiration_date', '—')
+                }
+    return {"found": False}
+
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
@@ -777,9 +851,7 @@ async def global_lookup(query: str) -> dict:
     tasks = []
     
     if qtype == "phone":
-        clean = clean_phone(query)
         tasks = [
-            # ====== ОСНОВНЫЕ ИНСТРУМЕНТЫ (БЕЗ КЛЮЧЕЙ) ======
             ("phonenumbers", run_with_timeout(phonenumbers_info(query), 12)),
             ("whatsapp", run_with_timeout(whatsapp_check(query), 10)),
             ("telegram", run_with_timeout(telegram_phone_check(query), 10)),
@@ -792,23 +864,23 @@ async def global_lookup(query: str) -> dict:
             ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 12)),
             ("htmlweb", run_with_timeout(htmlweb_lookup(query), 10)),
             ("hlr", run_with_timeout(hlr_lookup(query), 10)),
-            
-            # ====== ПАРСЕРЫ ======
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 15)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 12)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 12)),
-            ("xray", run_with_timeout(xray_lookup(query), 12)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 12)),
-            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 12)),
-            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 12)),
-            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 12)),
             ("whitepages", run_with_timeout(whitepages_check(query), 12)),
+            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_check(query), 12)),
+            ("thatsthem", run_with_timeout(thatsthem_check(query), 12)),
             ("revealname", run_with_timeout(revealname_check(query), 12)),
             ("callerid", run_with_timeout(callerid_check(query), 12)),
             ("spydialer", run_with_timeout(spydialer_check(query), 12)),
             ("usphonebook", run_with_timeout(usphonebook_check(query), 12)),
             ("syncme", run_with_timeout(syncme_check(query), 12)),
             ("whoseno", run_with_timeout(whoseno_check(query), 12)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 15)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 12)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 12)),
+            ("xray", run_with_timeout(xray_lookup(query), 12)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 12)),
+            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 12)),
+            ("fastpeoplesearch_parse", run_with_timeout(fastpeoplesearch_parse(query), 12)),
+            ("thatsthem_parse", run_with_timeout(thatsthem_lookup(query), 12)),
         ]
     
     elif qtype == "email":
@@ -861,64 +933,7 @@ async def global_lookup(query: str) -> dict:
     result["total_results"] = total
     return result
 
-# ==================== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-@safe_request
-async def ipinfo_lookup(ip: str) -> dict:
-    url = f"https://ipinfo.io/{ip}/json"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "country": data.get('country', '—'),
-                    "city": data.get('city', '—'),
-                    "region": data.get('region', '—'),
-                    "org": data.get('org', '—')
-                }
-    return None
-
-@safe_request
-async def ip_api_lookup(ip: str) -> dict:
-    url = f"http://ip-api.com/json/{ip}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('status') == 'success':
-                    return {
-                        "country": data.get('country', '—'),
-                        "city": data.get('city', '—'),
-                        "region": data.get('regionName', '—'),
-                        "isp": data.get('isp', '—'),
-                        "asn": data.get('as', '—')
-                    }
-    return None
-
-async def crtsh_lookup(domain: str) -> list:
-    url = f"https://crt.sh/?q={domain}&output=json"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data:
-                    return [{"domain": item.get('name_value', '—')} for item in data[:5]]
-    return []
-
-async def whois_lookup(domain: str) -> dict:
-    url = f"https://api.whois.vu/?q={domain}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "registrar": data.get('registrar', '—'),
-                    "creation_date": data.get('creation_date', '—'),
-                    "expiration_date": data.get('expiration_date', '—')
-                }
-    return None
-
-# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
+# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА (ИСПРАВЛЕННАЯ) ====================
 
 def generate_html_report(query: str, data: dict, report_id: str) -> str:
     sources = data.get("sources", {})
@@ -926,19 +941,51 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     total = data.get("total_results", 0)
     
     all_results = []
+    
     for source_name, items in sources.items():
-        if items:
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
+        if not items:
+            continue
+        
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    if _has_useful_data(item):
+                        item['_source'] = source_name
                         all_results.append(item)
-                    else:
-                        all_results.append({"title": str(item)})
-            elif isinstance(items, dict):
-                if items.get('found') or items.get('total', 0) > 0:
-                    all_results.append(items)
-            else:
-                all_results.append({"title": str(items)})
+                else:
+                    if str(item) and str(item) != '—' and str(item) != '':
+                        all_results.append({
+                            "title": str(item),
+                            "_source": source_name,
+                            "text": "",
+                            "extra": ""
+                        })
+        elif isinstance(items, dict):
+            if _has_useful_data(items):
+                item_copy = items.copy()
+                item_copy['_source'] = source_name
+                all_results.append(item_copy)
+        else:
+            if str(items) and str(items) != '—' and str(items) != '':
+                all_results.append({
+                    "title": str(items),
+                    "_source": source_name,
+                    "text": "",
+                    "extra": ""
+                })
+    
+    # Убираем дубликаты
+    seen_titles = set()
+    unique_results = []
+    for item in all_results:
+        title_key = str(item.get('title', ''))[:50] + str(item.get('_source', ''))
+        if title_key not in seen_titles:
+            seen_titles.add(title_key)
+            unique_results.append(item)
+    all_results = unique_results
+    
+    # Показываем ВСЕ результаты, которые нашли что-то (БЕЗ ОГРАНИЧЕНИЯ)
+    display_results = all_results
     
     title = generate_otob_title(query, qtype)
     
@@ -1095,6 +1142,18 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border: 1px solid #1a2a1a;
             font-weight: 600;
         }}
+        .source-tag {{
+            display: inline-block;
+            background: #1a2a1a;
+            color: #4a8a4a;
+            font-size: 10px;
+            padding: 2px 10px;
+            border-radius: 4px;
+            margin-left: 10px;
+            border: 1px solid #1a3a1a;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
         .empty {{ 
             color: #3a5a3a; 
             font-style: italic; 
@@ -1153,39 +1212,67 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         </div>
         <div class="stats-bar">
             <span class="stat">📊 Всего результатов: <strong>{total}</strong></span>
-            <span class="stat">🔍 Источников: <strong>{len(sources)}</strong></span>
+            <span class="stat">🔍 Источников с данными: <strong>{len(display_results)}</strong></span>
             <span class="stat">⚡ Статус: <strong style="color:#00ff00;">АКТИВЕН</strong></span>
         </div>
 """
     
-    if all_results:
-        for idx, item in enumerate(all_results[:30], 1):
-            title = item.get('title', '—')[:80]
-            text = item.get('text', '')[:250]
+    if display_results:
+        # Показываем ВСЕ результаты (БЕЗ ОГРАНИЧЕНИЯ!)
+        for idx, item in enumerate(display_results, 1):
+            source = item.get('_source', '')
+            title = item.get('title', '—')
+            if isinstance(title, bool):
+                title = "✅ Да" if title else "❌ Нет"
+            elif title == '' or title == '—':
+                title = '—'
+            title = str(title)[:80]
+            
+            text = item.get('text', '')
+            if isinstance(text, bool):
+                text = "✅ Да" if text else "❌ Нет"
+            elif text == '' or text == '—':
+                text = ''
+            text = str(text)[:250]
+            
             extra = item.get('extra', '')
+            if isinstance(extra, bool):
+                extra = "✅ Да" if extra else "❌ Нет"
+            elif extra == '' or extra == '—':
+                extra = ''
+            extra = str(extra)
+            
             link = item.get('link', '')
             
+            # Собираем дополнительные поля
             details = []
             for key, value in item.items():
-                if key not in ['title', 'text', 'extra', 'link'] and value:
-                    if isinstance(value, str) and value != '—' and value != '':
+                if key in ['_source', 'title', 'text', 'extra', 'link', 'found', 'exists']:
+                    continue
+                if value and value != '—' and value != '':
+                    if isinstance(value, str):
                         details.append(f"{key}: {value}")
-                    elif isinstance(value, list) and value:
+                    elif isinstance(value, list):
                         details.append(f"{key}: {', '.join(str(v) for v in value[:5])}")
-                    elif isinstance(value, dict) and value:
+                    elif isinstance(value, dict):
                         for k, v in value.items():
                             if v and v != '—':
                                 details.append(f"{key}.{k}: {v}")
+            
+            # Пропускаем только если совсем ничего нет
+            if not details and not text and not extra and (title == '—' or title == ''):
+                continue
             
             html += f"""
         <div class="result-item">
             <div class="title">
                 <span class="index">#{idx}</span>
                 {title}
+                {f'<span class="source-tag">{source[:15]}</span>' if source else ''}
                 {f'<a href="{link}" target="_blank">🔗</a>' if link else ''}
             </div>
 """
-            if text and text != '—' and text != '':
+            if text:
                 html += f"            <div class=\"text\">{text}</div>\n"
             if extra:
                 html += f"            <div class=\"extra\">📎 {extra}</div>\n"
@@ -1196,7 +1283,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         
         html += f"""
         <div style="text-align:center; margin-top:20px; padding:12px; border:1px solid #1a2a1a; border-radius:8px; color:#4a6a4a; font-size:13px;">
-            📊 Показано {min(len(all_results), 30)} из {total} результатов
+            📊 Показано {len(display_results)} из {total} найденных результатов
         </div>
 """
     else:
@@ -1500,7 +1587,7 @@ def users_command(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
-# ==================== ОБРАБОТЧИК ТЕКСТА (С ТАЙМАУТОМ 2 МИНУТЫ) ====================
+# ==================== ОБРАБОТЧИК ТЕКСТА ====================
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):

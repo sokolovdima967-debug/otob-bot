@@ -7,10 +7,7 @@ import random
 import aiohttp
 import asyncio
 import json
-import subprocess
 import sys
-import csv
-import io
 import threading
 import traceback
 from datetime import datetime
@@ -32,8 +29,6 @@ ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
 HUNTER_KEY = os.environ.get("HUNTER_KEY")
 SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")
-APILAYER_KEY = os.environ.get("APILAYER_KEY")
-FULLCONTACT_KEY = os.environ.get("FULLCONTACT_KEY")
 
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
@@ -53,6 +48,12 @@ def init_db():
                 searches_today INTEGER DEFAULT 0,
                 searches_extra INTEGER DEFAULT 0,
                 last_reset DATE DEFAULT CURRENT_DATE
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id INTEGER PRIMARY KEY,
+                subscribed BOOLEAN DEFAULT 1
             )
         ''')
         conn.commit()
@@ -417,8 +418,6 @@ async def hunter_lookup(email: str) -> dict:
                 }
     return None
 
-# ==================== НОВЫЕ API ====================
-
 @safe_request
 async def phonerep_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
@@ -483,8 +482,6 @@ async def clearbit_lookup(email: str) -> dict:
                     "twitter": data.get('twitter', {}).get('handle', '—')
                 }
     return None
-
-# ==================== НЕЛЕГАЛЬНЫЕ/ПАРСИНГ API ====================
 
 @safe_request
 async def hudsonrock_lookup(phone: str) -> dict:
@@ -595,7 +592,6 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
                     if resp.status == 200:
                         html = await resp.text()
         if html:
-            # ИСПОЛЬЗУЕМ HTML5LIB ВМЕСТО LXML
             soup = BeautifulSoup(html, 'html5lib')
             items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
             for item in items[:max_results]:
@@ -617,7 +613,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
         logger.error(f"Parse error for {url}: {e}")
     return results
 
-# ----- ВСЕ ПАРСЕРЫ (55+) -----
+# ----- ВСЕ ПАРСЕРЫ -----
 
 async def freecarrier_lookup(phone: str) -> list:
     clean = re.sub(r'\D', '', phone)
@@ -835,18 +831,6 @@ async def whois_lookup(domain: str) -> dict:
                 }
     return None
 
-async def zippopotam_lookup(postal_code: str, country: str = "RU") -> dict:
-    url = f"https://api.zippopotam.us/{country}/{postal_code}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "country": data.get('country', '—'),
-                    "places": data.get('places', [])[:3]
-                }
-    return None
-
 async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -868,7 +852,7 @@ async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
         pass
     return None
 
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК (УМЕНЬШЕННЫЙ ДЛЯ СТАБИЛЬНОСТИ) ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
@@ -891,7 +875,6 @@ async def global_lookup(query: str) -> dict:
             ("veriphone", veriphone_lookup(query)),
             ("abstractapi", abstractapi_lookup(query)),
             ("bigdatacloud", bigdatacloud_lookup(query)),
-            ("omkarcloud", omkarcloud_lookup(query)),
             ("htmlweb", htmlweb_lookup(query)),
             ("hlr", hlr_lookup(query)),
             ("numberlookup", numberlookup_api(query)),
@@ -899,7 +882,6 @@ async def global_lookup(query: str) -> dict:
             ("numlookup", numlookup_api(query)),
             ("zlookup", zlookup_api(query)),
             ("hudsonrock", hudsonrock_lookup(query)),
-            ("leadfinder", leadfinder_lookup(query)),
             ("freecarrier", freecarrier_lookup(query)),
             ("phoneowner", phoneowner_parse(query)),
             ("socialsearch", socialsearch_lookup(query)),
@@ -942,7 +924,6 @@ async def global_lookup(query: str) -> dict:
             ("socialsearch", socialsearch_lookup(query)),
             ("pipl", pipl_lookup(query)),
             ("duckduckgo", duckduckgo_search(query)),
-            ("leadfinder", leadfinder_lookup(query)),
         ]
     
     elif qtype == "domain":
@@ -1174,18 +1155,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border: 1px solid #1a2a1a;
             font-weight: 600;
         }}
-        .result-item .source-tag {{
-            display: inline-block;
-            background: #0a1a0a;
-            color: #4a8a4a;
-            font-size: 10px;
-            padding: 2px 10px;
-            border-radius: 4px;
-            border: 1px solid #1a2a1a;
-            margin-left: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
         .empty {{ 
             color: #3a5a3a; 
             font-style: italic; 
@@ -1210,16 +1179,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border-bottom: 1px dotted #1a3a1a;
         }}
         .footer a:hover {{ color: #00cc66; }}
-        
-        .glitch-text {{
-            color: #00ff00;
-            text-shadow: 0 0 10px rgba(0,255,0,0.2);
-            animation: glitch 3s infinite;
-        }}
-        @keyframes glitch {{
-            0%, 100% {{ opacity: 1; }}
-            50% {{ opacity: 0.8; }}
-        }}
         
         .scanline {{
             position: fixed;
@@ -1677,7 +1636,13 @@ def handle_text(message):
         
         # ======== ФИКС АСИНХРОНА ========
         try:
-            data = asyncio.run(global_lookup(text))
+            # Создаём новый цикл событий
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                data = loop.run_until_complete(global_lookup(text))
+            finally:
+                loop.close()
         except Exception as e:
             logger.error(f"❌ Ошибка выполнения поиска: {e}")
             bot.edit_message_text(
@@ -1725,7 +1690,7 @@ def handle_text(message):
         except:
             pass
 
-# ==================== ЗАПУСК (С ФИКСАМИ) ====================
+# ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
     init_db()
@@ -1743,4 +1708,10 @@ if __name__ == "__main__":
     time.sleep(2)
     
     # ЗАПУСК С ОЧИСТКОЙ
-    bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+    except Exception as e:
+        logger.error(f"❌ Ошибка polling: {e}")
+        time.sleep(5)
+        # Повторная попытка
+        bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)

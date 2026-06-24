@@ -24,7 +24,7 @@ import pytz
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 DB_PATH = os.path.join("/tmp", "glaz_isidy_bot.db")
-SEARCH_TIMEOUT = 60
+SEARCH_TIMEOUT = 90
 
 # ===== КЛЮЧИ API (ОПЦИОНАЛЬНО) =====
 VERIPHONE_KEY = os.environ.get("VERIPHONE_KEY")
@@ -33,6 +33,9 @@ NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
 ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
 HUNTER_KEY = os.environ.get("HUNTER_KEY")
+DEHASHED_KEY = os.environ.get("DEHASHED_KEY")
+DEHASHED_EMAIL = os.environ.get("DEHASHED_EMAIL")
+PROBIVON_KEY = os.environ.get("PROBIVON_KEY")
 
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
@@ -106,7 +109,7 @@ def can_search(user_id: int) -> bool:
     try:
         reset_daily_searches()
         user = get_user(user_id)
-        return user["searches_today"] < 3 or user["searches_extra"] > 0
+        return user["searches_today"] < 5 or user["searches_extra"] > 0
     except:
         return False
 
@@ -116,7 +119,7 @@ def use_search(user_id: int) -> int:
     try:
         reset_daily_searches()
         user = get_user(user_id)
-        if user["searches_today"] < 3:
+        if user["searches_today"] < 5:
             user["searches_today"] += 1
         elif user["searches_extra"] > 0:
             user["searches_extra"] -= 1
@@ -132,7 +135,7 @@ def get_remaining(user_id: int) -> int:
         return 999
     try:
         user = get_user(user_id)
-        return (3 - user["searches_today"]) + user["searches_extra"]
+        return (5 - user["searches_today"]) + user["searches_extra"]
     except:
         return 0
 
@@ -220,7 +223,7 @@ def safe_request(func):
             return None
     return wrapper
 
-async def run_with_timeout(coro, timeout=6):
+async def run_with_timeout(coro, timeout=8):
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
@@ -247,8 +250,9 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== ФУНКЦИИ ПОИСКА ====================
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ПОИСКА (60+ ИСТОЧНИКОВ) ====================
 
+# ----- 1. PHONENUMBERS (локальный анализ) -----
 async def phonenumbers_info(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -270,6 +274,7 @@ async def phonenumbers_info(phone: str) -> dict:
         logger.error(f"Phonenumbers error: {e}")
         return None
 
+# ----- 2. WHATSAPP -----
 async def whatsapp_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -283,7 +288,8 @@ async def whatsapp_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
-async def telegram_phone_check(phone: str) -> dict:
+# ----- 3. TELEGRAM -----
+async def telegram_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
         url = f"https://t.me/+{clean}"
@@ -296,6 +302,7 @@ async def telegram_phone_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
+# ----- 4. VIBER -----
 async def viber_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -307,6 +314,7 @@ async def viber_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
+# ----- 5. TRUECALLER (имя владельца) -----
 async def truecaller_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -324,6 +332,7 @@ async def truecaller_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 6. GETCONTACT (как записан в контактах) -----
 async def getcontact_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -345,6 +354,7 @@ async def getcontact_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 7. SYNC.ME (имя + спам) -----
 async def syncme_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -366,6 +376,7 @@ async def syncme_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 8. WHOSENO (имя владельца) -----
 async def whoseno_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -385,12 +396,13 @@ async def whoseno_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 9. NUMBUSTER (имя + платформы) -----
 async def numbuster_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
         url = f"https://numbuster.com/api/search?phone={clean}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=8) as resp:
+            async with session.get(url, timeout=6) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get('found'):
@@ -403,6 +415,7 @@ async def numbuster_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 10. EYECON (имя владельца) -----
 async def eyecon_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -422,6 +435,7 @@ async def eyecon_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 11. BELLINGCAT (Telegram) -----
 async def bellingcat_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -440,6 +454,7 @@ async def bellingcat_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 12. FACEBOOK BREACH (утечка) -----
 async def facebook_breach_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -457,6 +472,7 @@ async def facebook_breach_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 13. SPAMCALLS (спам-риск) -----
 async def spamcalls_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -474,7 +490,8 @@ async def spamcalls_check(phone: str) -> dict:
     except:
         return {"found": False, "spam_risk": "unknown"}
 
-async def htmlweb_lookup(phone: str) -> dict:
+# ----- 14. HTMLWEB (оператор, регион) -----
+async def htmlweb_public(phone: str) -> dict:
     clean = clean_phone(phone)
     url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
     async with aiohttp.ClientSession() as session:
@@ -491,7 +508,8 @@ async def htmlweb_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-async def hlr_lookup(phone: str) -> dict:
+# ----- 15. HLR (активность) -----
+async def hlr_public(phone: str) -> dict:
     clean = clean_phone(phone)
     url = f"https://smsc.ru/testhlr.php?phone={clean}"
     async with aiohttp.ClientSession() as session:
@@ -501,7 +519,76 @@ async def hlr_lookup(phone: str) -> dict:
                 return {"found": True, "status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
     return {"found": False}
 
-async def leakcheck_lookup(query: str) -> dict:
+# ----- 16. NUMLOOKUP (страна, оператор) -----
+async def numlookup_public(phone: str) -> dict:
+    clean = clean_phone(phone)
+    url = f"https://api.numlookup.com/validate?number={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=5) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('valid'):
+                    return {
+                        "found": True,
+                        "country": data.get('country_name', '—'),
+                        "carrier": data.get('carrier', '—'),
+                        "line_type": data.get('line_type', '—'),
+                        "location": data.get('location', '—')
+                    }
+    return {"found": False}
+
+# ----- 17. PHONEREP (спам-риск) -----
+async def phonerep_public(phone: str) -> dict:
+    clean = clean_phone(phone)
+    url = f"https://phonerep.com/api?phone={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=5) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "country": data.get('country', '—'),
+                    "carrier": data.get('carrier', '—'),
+                    "line_type": data.get('line_type', '—'),
+                    "spam_risk": data.get('spam_risk', 0)
+                }
+    return {"found": False}
+
+# ----- 18. ZLOOKUP (валидация) -----
+async def zlookup_public(phone: str) -> dict:
+    clean = clean_phone(phone)
+    url = f"https://api.zlookup.com/validate?number={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=5) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "valid": data.get('valid', False),
+                    "country": data.get('country', '—'),
+                    "carrier": data.get('carrier', '—')
+                }
+    return {"found": False}
+
+# ----- 19. NUMBERLOOKUP -----
+async def numberlookup_public(phone: str) -> dict:
+    clean = clean_phone(phone)
+    url = f"https://numberlookupapi.com/api?number={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=5) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('valid'):
+                    return {
+                        "found": True,
+                        "country": data.get('country', '—'),
+                        "carrier": data.get('carrier', '—'),
+                        "line_type": data.get('line_type', '—')
+                    }
+    return {"found": False}
+
+# ----- 20. LEAKCHECK (утечки) -----
+async def leakcheck_public(query: str) -> dict:
     url = f"https://leakcheck.io/api/public?check={query}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=6) as resp:
@@ -516,7 +603,8 @@ async def leakcheck_lookup(query: str) -> dict:
                     }
     return {"found": False}
 
-async def hudsonrock_lookup(phone: str) -> dict:
+# ----- 21. HUDSON ROCK (утечки) -----
+async def hudsonrock_public(phone: str) -> dict:
     clean = clean_phone(phone)
     url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
     async with aiohttp.ClientSession() as session:
@@ -531,6 +619,85 @@ async def hudsonrock_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
+# ----- 22. HIBP (утечки email) -----
+async def hibp_public(email: str) -> list:
+    url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=6) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return [b.get('Name') for b in data]
+    return []
+
+# ----- 23. EMAILREP (репутация email) -----
+async def emailrep_public(email: str) -> dict:
+    url = f"https://emailrep.io/{email}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=6) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "reputation": data.get('reputation', '—'),
+                    "suspicious": data.get('suspicious', False),
+                    "references": data.get('references', 0)
+                }
+    return {"found": False}
+
+# ----- 24. DUCKDUCKGO -----
+async def ddg_search(query: str) -> list:
+    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 25. SOCIALSEARCH (соцсети) -----
+async def socialsearch_lookup(query: str) -> list:
+    url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 26. PIPL (поиск людей) -----
+async def pipl_lookup(query: str) -> list:
+    url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 27. X-RAY (адреса, фото) -----
+async def xray_lookup(query: str) -> list:
+    url = f"https://x-ray.contact/search?q={query}"
+    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 28. IDCRAWL -----
+async def idcrawl_lookup(query: str) -> list:
+    url = f"https://idcrawl.com/{query}"
+    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 29. TRUEPEOPLESEARCH (адреса, родственники) -----
+async def truepeoplesearch_lookup(query: str) -> list:
+    if re.search(r'\d', query):
+        url = f"https://truepeoplesearch.com/results?phoneno={query}"
+    else:
+        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
+    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 30. FASTPEOPLESEARCH -----
+async def fastpeoplesearch_parse(phone: str) -> list:
+    clean = clean_phone(phone)
+    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
+    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 31. THATSTHEM (возраст, родственники) -----
+async def thatsthem_lookup(phone: str) -> list:
+    clean = clean_phone(phone)
+    url = f"https://thatsthem.com/phone/{clean}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
+    return await parse_site(url, selectors, 5)
+
+# ----- 32. WHITEPAGES -----
 async def whitepages_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -546,6 +713,7 @@ async def whitepages_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 33. FASTPEOPLESEARCH (проверка) -----
 async def fastpeoplesearch_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -563,6 +731,7 @@ async def fastpeoplesearch_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 34. THATSTHEM (проверка) -----
 async def thatsthem_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -580,6 +749,7 @@ async def thatsthem_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 35. REVEALNAME -----
 async def revealname_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -597,6 +767,7 @@ async def revealname_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 36. CALLERID -----
 async def callerid_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -614,6 +785,7 @@ async def callerid_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 37. SPYDIALER -----
 async def spydialer_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -629,6 +801,7 @@ async def spydialer_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 38. USPHONEBOOK -----
 async def usphonebook_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -646,23 +819,7 @@ async def usphonebook_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-async def truepeoplesearch_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://truepeoplesearch.com/results?phoneno={clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('h1', class_=re.compile('name|title'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
+# ----- 39. 411.COM -----
 async def fouroneone_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -680,6 +837,7 @@ async def fouroneone_check(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 40. CB-PHONEHUNTER (агрегатор) -----
 async def cb_phonehunter(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -724,6 +882,7 @@ async def cb_phonehunter(phone: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 41. LEAKER (агрегатор утечек) -----
 async def leaker_lookup(query: str) -> dict:
     try:
         results = {"found": False, "sources": []}
@@ -764,6 +923,7 @@ async def leaker_lookup(query: str) -> dict:
     except:
         return {"found": False}
 
+# ----- 42. TELESPOTTER (поиск по людям) -----
 async def telespotter_lookup(phone: str) -> list:
     try:
         clean = clean_phone(phone)
@@ -792,30 +952,7 @@ async def telespotter_lookup(phone: str) -> list:
     except:
         return []
 
-async def leadfinder_lookup(phone: str, city: str = "Moscow") -> list:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "leadfinder-api", "--niche", "бизнес", "--city", city, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-        if stdout:
-            data = json.loads(stdout)
-            if data.get('results'):
-                results = []
-                for biz in data['results'][:5]:
-                    if phone in str(biz.get('phone', '')):
-                        results.append({
-                            "title": biz.get('name', '—'),
-                            "text": f"Телефон: {biz.get('phone', '—')}",
-                            "extra": f"Адрес: {biz.get('address', '—')}, Рейтинг: {biz.get('rating', '—')}"
-                        })
-                return results
-    except:
-        pass
-    return []
-
+# ----- 43. NUMVERIFY (с ключом) -----
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
         return None
@@ -835,6 +972,7 @@ async def numverify_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
+# ----- 44. ABSTRACTAPI (с ключом) -----
 async def abstractapi_lookup(phone: str) -> dict:
     if not ABSTRACT_API_KEY:
         return None
@@ -854,51 +992,43 @@ async def abstractapi_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-async def duckduckgo_search(query: str) -> list:
-    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
-    return await parse_site(url, selectors, 5)
+# ----- 45. DEHASHED (утечки с адресами) -----
+async def dehashed_lookup(query: str) -> dict:
+    if not DEHASHED_KEY or not DEHASHED_EMAIL:
+        return None
+    url = f"https://api.dehashed.com/search?query={query}"
+    auth = aiohttp.BasicAuth(DEHASHED_EMAIL, DEHASHED_KEY)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, auth=auth, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": data.get('total', 0) > 0,
+                    "total": data.get('total', 0),
+                    "entries": data.get('entries', [])[:5]
+                }
+    return {"found": False}
 
-async def socialsearch_lookup(query: str) -> list:
-    url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
-    return await parse_site(url, selectors, 5)
+# ----- 46. PROBIVON (глубокий пробив) -----
+async def probivon_lookup(query: str) -> dict:
+    if not PROBIVON_KEY:
+        return None
+    url = f"https://api.probivon.com/v1/search?q={query}"
+    headers = {"Authorization": f"Bearer {PROBIVON_KEY}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "name": data.get('name', '—'),
+                    "address": data.get('address', '—'),
+                    "social": data.get('social_networks', []),
+                    "breaches": data.get('breaches', [])
+                }
+    return {"found": False}
 
-async def pipl_lookup(query: str) -> list:
-    url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
-    return await parse_site(url, selectors, 5)
-
-async def xray_lookup(query: str) -> list:
-    url = f"https://x-ray.contact/search?q={query}"
-    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 5)
-
-async def idcrawl_lookup(query: str) -> list:
-    url = f"https://idcrawl.com/{query}"
-    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 5)
-
-async def truepeoplesearch_lookup(query: str) -> list:
-    if re.search(r'\d', query):
-        url = f"https://truepeoplesearch.com/results?phoneno={query}"
-    else:
-        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
-    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
-    return await parse_site(url, selectors, 5)
-
-async def fastpeoplesearch_parse(phone: str) -> list:
-    clean = clean_phone(phone)
-    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-async def thatsthem_lookup(phone: str) -> list:
-    clean = clean_phone(phone)
-    url = f"https://thatsthem.com/phone/{clean}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
-    return await parse_site(url, selectors, 5)
-
+# ----- 47. GOOGLE DORKS -----
 async def google_dorks_search(query: str) -> list:
     results = []
     dorks = [
@@ -910,8 +1040,17 @@ async def google_dorks_search(query: str) -> list:
         f'site:vk.com "{query}"',
         f'site:truecaller.com "{query}"',
         f'site:getcontact.com "{query}"',
+        f'site:avito.ru "{query}"',
+        f'site:auto.ru "{query}"',
+        f'"телефон" "{query}"',
+        f'"тел" "{query}"',
+        f'"{query}" "адрес"',
+        f'"{query}" "улица"',
+        f'"{query}" "дом"',
+        f'"{query}" "квартира"',
+        f'"{query}" "родственник"',
     ]
-    for dork in dorks[:4]:
+    for dork in dorks[:6]:
         try:
             url = f"https://html.duckduckgo.com/html/?q={dork.replace(' ', '+')}"
             headers = {"User-Agent": ua.random}
@@ -986,85 +1125,111 @@ async def global_lookup(query: str) -> dict:
     
     if qtype == "phone":
         tasks = [
+            # ====== ЛОКАЛЬНЫЙ АНАЛИЗ ======
             ("phonenumbers", run_with_timeout(phonenumbers_info(query), 5)),
+            
+            # ====== МЕССЕНДЖЕРЫ ======
             ("whatsapp", run_with_timeout(whatsapp_check(query), 5)),
-            ("telegram", run_with_timeout(telegram_phone_check(query), 5)),
+            ("telegram", run_with_timeout(telegram_check(query), 5)),
             ("viber", run_with_timeout(viber_check(query), 5)),
+            ("bellingcat", run_with_timeout(bellingcat_check(query), 5)),
+            
+            # ====== ИМЯ ВЛАДЕЛЬЦА (ГЛУБОКИЙ ПОИСК) ======
             ("truecaller", run_with_timeout(truecaller_check(query), 6)),
             ("getcontact", run_with_timeout(getcontact_check(query), 6)),
             ("syncme", run_with_timeout(syncme_check(query), 5)),
             ("whoseno", run_with_timeout(whoseno_check(query), 5)),
             ("eyecon", run_with_timeout(eyecon_check(query), 5)),
-            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 6)),
-            ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 6)),
-            ("facebook_breach", run_with_timeout(facebook_breach_check(query), 5)),
-            ("leaker", run_with_timeout(leaker_lookup(query), 8)),
-            ("spamcalls", run_with_timeout(spamcalls_check(query), 5)),
-            ("htmlweb", run_with_timeout(htmlweb_lookup(query), 5)),
-            ("hlr", run_with_timeout(hlr_lookup(query), 5)),
             ("numbuster", run_with_timeout(numbuster_check(query), 6)),
-            ("bellingcat", run_with_timeout(bellingcat_check(query), 5)),
+            ("revealname", run_with_timeout(revealname_check(query), 5)),
+            ("callerid", run_with_timeout(callerid_check(query), 5)),
+            ("spydialer", run_with_timeout(spydialer_check(query), 5)),
+            ("usphonebook", run_with_timeout(usphonebook_check(query), 5)),
+            ("fouroneone", run_with_timeout(fouroneone_check(query), 5)),
+            
+            # ====== АДРЕСА И РОДСТВЕННИКИ ======
+            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 6)),
+            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 5)),
+            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 5)),
+            ("whitepages", run_with_timeout(whitepages_check(query), 5)),
+            ("fastpeoplesearch_check", run_with_timeout(fastpeoplesearch_check(query), 5)),
+            ("thatsthem_check", run_with_timeout(thatsthem_check(query), 5)),
+            
+            # ====== API БЕЗ КЛЮЧЕЙ ======
+            ("htmlweb", run_with_timeout(htmlweb_public(query), 5)),
+            ("hlr", run_with_timeout(hlr_public(query), 5)),
+            ("numlookup", run_with_timeout(numlookup_public(query), 5)),
+            ("phonerep", run_with_timeout(phonerep_public(query), 5)),
+            ("zlookup", run_with_timeout(zlookup_public(query), 5)),
+            ("numberlookup", run_with_timeout(numberlookup_public(query), 5)),
+            
+            # ====== УТЕЧКИ ======
+            ("leakcheck", run_with_timeout(leakcheck_public(query), 5)),
+            ("hudsonrock", run_with_timeout(hudsonrock_public(query), 5)),
+            ("facebook_breach", run_with_timeout(facebook_breach_check(query), 5)),
+            ("leaker", run_with_timeout(leaker_lookup(query), 6)),
+            ("dehashed", run_with_timeout(dehashed_lookup(query), 6)),
+            ("probivon", run_with_timeout(probivon_lookup(query), 8)),
+            
+            # ====== СПАМ ======
+            ("spamcalls", run_with_timeout(spamcalls_check(query), 5)),
+            
+            # ====== ПОИСК В ИНТЕРНЕТЕ ======
+            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 5)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 5)),
+            ("xray", run_with_timeout(xray_lookup(query), 5)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 5)),
+            ("cb_phonehunter", run_with_timeout(cb_phonehunter(query), 6)),
+            ("telespotter", run_with_timeout(telespotter_lookup(query), 6)),
+            ("google_dorks", run_with_timeout(google_dorks_search(query), 6)),
+            
+            # ====== API С КЛЮЧАМИ ======
             ("numverify", run_with_timeout(numverify_lookup(query), 5)),
             ("abstractapi", run_with_timeout(abstractapi_lookup(query), 5)),
-            ("cb_phonehunter", run_with_timeout(cb_phonehunter(query), 8)),
-            ("telespotter", run_with_timeout(telespotter_lookup(query), 8)),
-            ("leadfinder", run_with_timeout(leadfinder_lookup(query), 10)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
-            ("xray", run_with_timeout(xray_lookup(query), 6)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
-            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 6)),
-            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 6)),
-            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 6)),
-            ("whitepages", run_with_timeout(whitepages_check(query), 6)),
-            ("fastpeoplesearch_check", run_with_timeout(fastpeoplesearch_check(query), 6)),
-            ("thatsthem_check", run_with_timeout(thatsthem_check(query), 6)),
-            ("revealname", run_with_timeout(revealname_check(query), 6)),
-            ("callerid", run_with_timeout(callerid_check(query), 6)),
-            ("spydialer", run_with_timeout(spydialer_check(query), 6)),
-            ("usphonebook", run_with_timeout(usphonebook_check(query), 6)),
-            ("truepeoplesearch_check", run_with_timeout(truepeoplesearch_check(query), 6)),
-            ("fouroneone", run_with_timeout(fouroneone_check(query), 6)),
-            ("google_dorks", run_with_timeout(google_dorks_search(query), 8)),
         ]
     
     elif qtype == "email":
         tasks = [
-            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 6)),
-            ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 6)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
-            ("leaker", run_with_timeout(leaker_lookup(query), 8)),
+            ("hibp", run_with_timeout(hibp_public(query), 5)),
+            ("emailrep", run_with_timeout(emailrep_public(query), 5)),
+            ("leakcheck", run_with_timeout(leakcheck_public(query), 5)),
+            ("hudsonrock", run_with_timeout(hudsonrock_public(query), 5)),
+            ("dehashed", run_with_timeout(dehashed_lookup(query), 6)),
+            ("probivon", run_with_timeout(probivon_lookup(query), 8)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 5)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 5)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
+            ("leaker", run_with_timeout(leaker_lookup(query), 6)),
         ]
     
     elif qtype == "username":
         tasks = [
-            ("xray", run_with_timeout(xray_lookup(query), 6)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
-            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 6)),
-            ("leaker", run_with_timeout(leaker_lookup(query), 8)),
+            ("xray", run_with_timeout(xray_lookup(query), 5)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 5)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 5)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 5)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
+            ("leakcheck", run_with_timeout(leakcheck_public(query), 5)),
+            ("leaker", run_with_timeout(leaker_lookup(query), 6)),
+            ("probivon", run_with_timeout(probivon_lookup(query), 8)),
         ]
     
     elif qtype == "ip":
         tasks = [
             ("ipinfo", run_with_timeout(ipinfo_lookup(query), 5)),
             ("ip_api", run_with_timeout(ip_api_lookup(query), 5)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
         ]
     
     elif qtype == "domain":
         tasks = [
             ("crtsh", run_with_timeout(crtsh_lookup(query), 5)),
             ("whois", run_with_timeout(whois_lookup(query), 5)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
         ]
     else:
-        tasks = [("duckduckgo", run_with_timeout(duckduckgo_search(query), 8))]
+        tasks = [("duckduckgo", run_with_timeout(ddg_search(query), 6))]
     
     if tasks:
         results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
@@ -1450,7 +1615,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             <div>
                 <h1>👁️ Глаз Исиды <span>OSINT</span></h1>
                 <div class="sub">⚡ Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
-                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 40+ источников · Глобальный поиск</div>
+                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 60+ источников · Глубокий OSINT</div>
             </div>
             <div><span class="badge badge-success">🎯 НАЙДЕНО: {total}</span></div>
         </div>
@@ -1607,8 +1772,9 @@ def callback_handler(call):
         if call.data == "menu_back":
             bot.edit_message_text(
                 "👁️ *Глаз Исиды — OSINT*\n\n"
-                "🕵️ *Глобальный OSINT-поиск*\n"
-                "40+ источников\n\n"
+                "🕵️ *Глубокий OSINT-поиск*\n"
+                "60+ источников\n"
+                "ФИО · Адреса · Родственники · Утечки\n\n"
                 "⚡ *Выбери действие:*",
                 call.message.chat.id,
                 call.message.message_id,
@@ -1643,7 +1809,7 @@ def callback_handler(call):
                 f"🆔 ID: `{user.id}`\n"
                 f"👤 Username: @{user.username or 'нет'}\n"
                 f"📛 Имя: {user.first_name or '—'}\n\n"
-                f"📊 Использовано: {user_data['searches_today']}/3\n"
+                f"📊 Использовано: {user_data['searches_today']}/5\n"
                 f"📊 Бонусных: {user_data['searches_extra']}\n"
                 f"📊 Осталось: {remaining}\n"
                 f"⏰ Сброс: в 00:00 МСК\n"
@@ -1667,7 +1833,7 @@ def callback_handler(call):
             extra = get_user(user_id)["searches_extra"]
             text = (
                 "📊 *Твой баланс*\n\n"
-                f"🔍 Использовано: {used}/3\n"
+                f"🔍 Использовано: {used}/5\n"
                 f"📊 Бонусных: {extra}\n"
                 f"📊 Осталось: {remaining}\n"
                 f"⏰ Сброс: в 00:00 МСК\n"
@@ -1690,7 +1856,7 @@ def callback_handler(call):
                 "📌 *Как пользоваться:*\n"
                 "• Отправь номер, email, никнейм, IP или домен\n"
                 "• Глобальный поиск — всё в одном запросе\n\n"
-                "📊 *Лимит:* 3 поиска в день (сброс в 00:00 МСК)\n"
+                "📊 *Лимит:* 5 поисков в день (сброс в 00:00 МСК)\n"
                 "👑 *Админ:* безлимитный доступ\n\n"
                 "🛡️ *Канал:* @Arhapov\n"
                 "👁️ *Глаз Исиды — OSINT*",
@@ -1714,8 +1880,8 @@ def callback_handler(call):
                 "• 🌐 IP: `8.8.8.8`\n"
                 "• 🌍 Домен: `example.com`\n"
                 "• 📝 Любой текст\n\n"
-                "⚡ *40+ OSINT-источников*\n"
-                "🕵️ Имя · Адрес · Оператор · Соцсети · Утечки\n"
+                "⚡ *60+ OSINT-источников*\n"
+                "🕵️ ФИО · Адреса · Родственники · Утечки\n"
                 "📱 WhatsApp · Telegram · Viber · Truecaller · GetContact",
                 call.message.chat.id,
                 call.message.message_id,
@@ -1731,7 +1897,7 @@ def callback_handler(call):
                 "📧 *ПРОВЕРКА EMAIL*\n\n"
                 "Отправь email для проверки утечек.\n\n"
                 "Пример: `user@example.com`\n\n"
-                "🔍 Проверка в базах утечек (LeakCheck, Hudson Rock)\n"
+                "🔍 Проверка в базах утечек (LeakCheck, Hudson Rock, Dehashed)\n"
                 "📊 Репутация (EmailRep)\n"
                 "🏢 Компания (Clearbit, Hunter)",
                 call.message.chat.id,
@@ -1749,9 +1915,9 @@ def callback_handler(call):
                 "Отправь номер для проверки.\n\n"
                 "Пример: `+79991234567`\n\n"
                 "🔍 Оператор · Страна · Регион\n"
-                "🕵️ Владелец · Как записан в контактах\n"
+                "🕵️ ФИО · Адреса · Родственники\n"
                 "📱 WhatsApp · Telegram · Viber\n"
-                "⚡ 35+ источников по номеру + утечки",
+                "⚡ 45+ источников по номеру + утечки",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1767,7 +1933,7 @@ def callback_handler(call):
                 "Отправь никнейм для поиска в соцсетях.\n\n"
                 "Пример: `username`\n\n"
                 "🔍 GitHub · Telegram · Соцсети\n"
-                "🕵️ Pipl · PeekYou · SocialSearch\n"
+                "🕵️ Pipl · SocialSearch · X-Ray\n"
                 "💀 Утечки · Даркнет",
                 call.message.chat.id,
                 call.message.message_id,
@@ -1808,8 +1974,9 @@ def start_command(message):
             message.chat.id,
             f"👁️ *Глаз Исиды — OSINT*\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
-            f"⚡ Глобальный OSINT-поиск\n\n"
-            f"📊 *Осталось:* {remaining}/3\n\n"
+            f"⚡ Глубокий OSINT-поиск\n"
+            f"🛡️ 60+ источников\n\n"
+            f"📊 *Осталось:* {remaining}/5\n\n"
             f"📌 *Выбери действие:*",
             parse_mode="Markdown",
             reply_markup=main_menu_keyboard()
@@ -1871,7 +2038,7 @@ def users_command(message):
             return
         text = "📊 *Список пользователей*\n\n"
         for user_id, username, today, extra in rows[:20]:
-            total = (3 - today) + extra
+            total = (5 - today) + extra
             text += f"• `{user_id}` — @{username or 'нет'} | запросов: {total}\n"
         bot.reply_to(message, text, parse_mode="Markdown")
     except Exception as e:
@@ -1896,9 +2063,10 @@ def handle_text(message):
         start_time = time.time()
         msg = bot.reply_to(
             message,
-            "👁️ *Глаз Исиды — сканирование...*\n"
-            "⏱️ Время: до 60 секунд\n"
-            "🕵️ 40+ источников...",
+            "👁️ *Глаз Исиды — глубокое сканирование...*\n"
+            "⏱️ Время: до 90 секунд\n"
+            "🕵️ 60+ источников...\n"
+            "📋 Ищу ФИО · Адреса · Родственников · Утечки",
             parse_mode="Markdown"
         )
         
@@ -1907,11 +2075,11 @@ def handle_text(message):
             asyncio.set_event_loop(loop)
             try:
                 data = loop.run_until_complete(
-                    asyncio.wait_for(global_lookup(text), timeout=60)
+                    asyncio.wait_for(global_lookup(text), timeout=90)
                 )
             except asyncio.TimeoutError:
                 bot.edit_message_text(
-                    "⚠️ *Поиск прерван по таймауту (60 секунд)*\n\n"
+                    "⚠️ *Поиск прерван по таймауту (90 секунд)*\n\n"
                     "📌 Показаны только быстрые результаты.\n"
                     "🔄 Попробуй повторить запрос позже.",
                     chat_id,
@@ -1951,7 +2119,7 @@ def handle_text(message):
                 caption=f"👁️ *OSINT-ОТЧЁТ*\n\n"
                         f"🔍 Запрос: `{text}`\n"
                         f"📌 Найдено: **{total}**\n"
-                        f"🔍 Осталось: **{remaining}/3**\n"
+                        f"🔍 Осталось: **{remaining}/5**\n"
                         f"⏱️ Время: **{elapsed:.1f} сек**\n"
                         f"🛡️ @Arhapov",
                 parse_mode="Markdown"
@@ -1973,7 +2141,8 @@ if __name__ == "__main__":
     init_db()
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
     logger.info("🛡️ Канал: @Arhapov")
-    logger.info("⚡ Таймаут поиска: 60 секунд")
+    logger.info("⚡ Таймаут поиска: 90 секунд")
+    logger.info("📊 60+ источников: ФИО · Адреса · Родственники · Утечки")
     logger.info("👁️ С поддержкой Архапова")
     
     try:

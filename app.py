@@ -229,16 +229,17 @@ async def run_with_timeout(coro, timeout=12):
         return None
 
 def request_via_scraperapi(url: str) -> str:
+    """Обход блокировок через ScraperAPI"""
     if not SCRAPERAPI_KEY:
         return None
     try:
         import requests
-        proxy_url = f"https://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={url}"
-        response = requests.get(proxy_url, timeout=15)
+        proxy_url = f"https://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={url}&render=true"
+        response = requests.get(proxy_url, timeout=20)
         if response.status_code == 200:
             return response.text
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"ScraperAPI error: {e}")
     return None
 
 def clean_phone(phone: str) -> str:
@@ -260,7 +261,7 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== ВСЕ ФУНКЦИИ ПОИСКА ====================
+# ==================== ВСЕ ФУНКЦИИ ПОИСКА (С ОБХОДОМ БЛОКИРОВОК) ====================
 
 async def phonenumbers_info(phone: str) -> dict:
     try:
@@ -287,8 +288,17 @@ async def whatsapp_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
         url = f"https://wa.me/{clean}"
+        headers = {"User-Agent": ua.random}
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+            if html:
+                if "WhatsApp" in html or "whatsapp" in html.lower():
+                    return {"found": True, "exists": True, "url": f"https://wa.me/{clean}"}
+                return {"found": False, "exists": False}
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10, allow_redirects=False) as resp:
+            async with session.get(url, headers=headers, timeout=10, allow_redirects=False) as resp:
                 if resp.status == 200 or resp.status == 302:
                     return {"found": True, "exists": True, "url": f"https://wa.me/{clean}"}
                 return {"found": False, "exists": False}
@@ -299,8 +309,17 @@ async def telegram_phone_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
         url = f"https://t.me/+{clean}"
+        headers = {"User-Agent": ua.random}
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+            if html:
+                if "telegram" in html.lower() or "tgme" in html.lower():
+                    return {"found": True, "exists": True, "url": f"https://t.me/+{clean}"}
+                return {"found": False, "exists": False}
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10, allow_redirects=False) as resp:
+            async with session.get(url, headers=headers, timeout=10, allow_redirects=False) as resp:
                 if resp.status == 200 or resp.status == 302:
                     return {"found": True, "exists": True, "url": f"https://t.me/+{clean}"}
                 return {"found": False, "exists": False}
@@ -311,8 +330,17 @@ async def viber_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
         url = f"https://www.viber.com/{clean}"
+        headers = {"User-Agent": ua.random}
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+            if html:
+                if "viber" in html.lower():
+                    return {"found": True, "exists": True}
+                return {"found": False, "exists": False}
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10, allow_redirects=False) as resp:
+            async with session.get(url, headers=headers, timeout=10, allow_redirects=False) as resp:
                 return {"found": resp.status == 200, "exists": resp.status == 200}
     except:
         return {"found": False, "exists": False}
@@ -322,21 +350,29 @@ async def truecaller_enhanced(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://www.truecaller.com/search/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title|fullname'))
-                    tags = soup.find_all('span', class_=re.compile('tag|label'))
-                    spam = soup.find('div', class_=re.compile('spam|risk'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—",
-                        "tags": [t.get_text(strip=True) for t in tags[:5]] if tags else [],
-                        "spam_risk": spam.get_text(strip=True) if spam else "—"
-                    }
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|title|fullname'))
+            tags = soup.find_all('span', class_=re.compile('tag|label'))
+            spam = soup.find('div', class_=re.compile('spam|risk'))
+            return {
+                "found": True if name else False,
+                "name": name.get_text(strip=True) if name else "—",
+                "tags": [t.get_text(strip=True) for t in tags[:5]] if tags else [],
+                "spam_risk": spam.get_text(strip=True) if spam else "—"
+            }
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -345,20 +381,27 @@ async def getcontact_enhanced(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://www.getcontact.com/ru/search/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    names = soup.find_all('span', class_=re.compile('name|title|contact'))
-                    if names:
-                        return {
-                            "found": True,
-                            "names": [n.get_text(strip=True) for n in names[:10]],
-                            "source": "GetContact"
-                        }
-                    return {"found": False}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            names = soup.find_all('span', class_=re.compile('name|title|contact'))
+            if names:
+                return {
+                    "found": True,
+                    "names": [n.get_text(strip=True) for n in names[:10]],
+                    "source": "GetContact"
+                }
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -367,19 +410,27 @@ async def syncme_enhanced(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://sync.me/search?q={clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title'))
-                    spam = soup.find('span', class_=re.compile('spam|risk'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—",
-                        "spam_level": spam.get_text(strip=True) if spam else "—"
-                    }
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|title'))
+            spam = soup.find('span', class_=re.compile('spam|risk'))
+            return {
+                "found": True if name else False,
+                "name": name.get_text(strip=True) if name else "—",
+                "spam_level": spam.get_text(strip=True) if spam else "—"
+            }
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -388,17 +439,25 @@ async def whoseno_enhanced(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://whoseno.com/search?q={clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|result|contact'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—"
-                    }
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|result|contact'))
+            return {
+                "found": True if name else False,
+                "name": name.get_text(strip=True) if name else "—"
+            }
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -425,17 +484,25 @@ async def eyecon_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://eyecon-app.com/search?phone={clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—"
-                    }
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|title'))
+            return {
+                "found": True if name else False,
+                "name": name.get_text(strip=True) if name else "—"
+            }
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -484,12 +551,19 @@ async def ignorant_check(phone: str) -> list:
     for name, url in platforms:
         try:
             headers = {"User-Agent": ua.random}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=8, allow_redirects=False) as resp:
-                    if resp.status == 200 or resp.status == 302:
-                        results.append({"platform": name, "exists": True})
-                    else:
-                        results.append({"platform": name, "exists": False})
+            if SCRAPERAPI_KEY:
+                html = request_via_scraperapi(url)
+                if html:
+                    results.append({"platform": name, "exists": True})
+                else:
+                    results.append({"platform": name, "exists": False})
+            else:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, headers=headers, timeout=8, allow_redirects=False) as resp:
+                        if resp.status == 200 or resp.status == 302:
+                            results.append({"platform": name, "exists": True})
+                        else:
+                            results.append({"platform": name, "exists": False})
         except:
             results.append({"platform": name, "exists": False})
     return results
@@ -531,15 +605,23 @@ async def spamcalls_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://spamcalls.net/ru/number/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    if "спам" in html.lower() or "мошенник" in html.lower():
-                        return {"found": True, "spam_risk": "high"}
-                    elif "не спам" in html.lower():
-                        return {"found": True, "spam_risk": "low"}
-                return {"found": False, "spam_risk": "unknown"}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=10) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            if "спам" in html.lower() or "мошенник" in html.lower():
+                return {"found": True, "spam_risk": "high"}
+            elif "не спам" in html.lower():
+                return {"found": True, "spam_risk": "low"}
+        return {"found": False, "spam_risk": "unknown"}
     except:
         return {"found": False, "spam_risk": "unknown"}
 
@@ -577,13 +659,21 @@ async def whitepages_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://www.whitepages.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    if "No results found" not in html:
-                        return {"found": True}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            if "No results found" not in html:
+                return {"found": True}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -592,15 +682,23 @@ async def fastpeoplesearch_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://www.fastpeoplesearch.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('h1', class_=re.compile('name|title|fullname'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('h1', class_=re.compile('name|title|fullname'))
+            if name:
+                return {"found": True, "name": name.get_text(strip=True)}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -609,15 +707,23 @@ async def thatsthem_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://thatsthem.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|fullname'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|fullname'))
+            if name:
+                return {"found": True, "name": name.get_text(strip=True)}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -626,15 +732,23 @@ async def revealname_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://revealname.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|owner|result'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|owner|result'))
+            if name:
+                return {"found": True, "name": name.get_text(strip=True)}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -643,15 +757,23 @@ async def callerid_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://callerid.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('h1', class_=re.compile('name|title'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('h1', class_=re.compile('name|title'))
+            if name:
+                return {"found": True, "name": name.get_text(strip=True)}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -660,13 +782,21 @@ async def spydialer_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://www.spydialer.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    if "No records found" not in html:
-                        return {"found": True}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            if "No records found" not in html:
+                return {"found": True}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -675,15 +805,23 @@ async def usphonebook_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://www.usphonebook.com/phone/{clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|fullname'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|fullname'))
+            if name:
+                return {"found": True, "name": name.get_text(strip=True)}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -692,13 +830,21 @@ async def syncme_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://sync.me/search?q={clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    if "No results" not in html:
-                        return {"found": True}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            if "No results" not in html:
+                return {"found": True}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -707,15 +853,23 @@ async def whoseno_check(phone: str) -> dict:
         clean = clean_phone(phone)
         url = f"https://whoseno.com/search?q={clean}"
         headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=12) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|result'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
+        html = None
+        
+        if SCRAPERAPI_KEY:
+            html = request_via_scraperapi(url)
+        
+        if not html:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=12) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+        
+        if html:
+            soup = BeautifulSoup(html, 'html5lib')
+            name = soup.find('div', class_=re.compile('name|result'))
+            if name:
+                return {"found": True, "name": name.get_text(strip=True)}
+        return {"found": False}
     except:
         return {"found": False}
 
@@ -1004,7 +1158,7 @@ async def whois_lookup(domain: str) -> dict:
                 }
     return {"found": False}
 
-# ==================== HTML-ОТЧЁТ (КРАСНО-ЧЁРНЫЙ, ПИРАМИДА С ГЛАЗОМ) ====================
+# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА (КРАСНО-ЧЁРНЫЙ) ====================
 
 def generate_html_report(query: str, data: dict, report_id: str) -> str:
     sources = data.get("sources", {})
@@ -1304,17 +1458,12 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     <div class="container">
         <div class="watermark">
             <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <!-- Пирамида -->
                 <polygon points="50,5 5,85 95,85" stroke="#cc3333" stroke-width="2.5" fill="none"/>
-                <!-- Глаз -->
                 <circle cx="50" cy="45" r="14" stroke="#cc3333" stroke-width="2" fill="none"/>
-                <!-- Зрачок -->
                 <circle cx="50" cy="45" r="5" fill="#cc3333"/>
                 <circle cx="48" cy="43" r="2" fill="#ff6666" opacity="0.6"/>
-                <!-- Брови -->
                 <path d="M32 28 L42 22" stroke="#cc3333" stroke-width="2.5" stroke-linecap="round"/>
                 <path d="M68 28 L58 22" stroke="#cc3333" stroke-width="2.5" stroke-linecap="round"/>
-                <!-- Боковые линии -->
                 <line x1="15" y1="85" x2="50" y2="50" stroke="#6a2a2a" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.3"/>
                 <line x1="85" y1="85" x2="50" y2="50" stroke="#6a2a2a" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.3"/>
                 <text x="50" y="98" font-family="Cinzel, serif" font-size="10" fill="#cc3333" text-anchor="middle" letter-spacing="3">OTOB</text>
@@ -1849,6 +1998,7 @@ if __name__ == "__main__":
     logger.info("🔱 OTOB — OSINT запускается...")
     logger.info("🛡️ Канал: @OTOBsearch")
     logger.info("⚡ Таймаут поиска: 2 минуты")
+    logger.info("🚀 ScraperAPI: " + ("✅ ДОСТУПЕН" if SCRAPERAPI_KEY else "❌ НЕ НАЙДЕН (будут блокировки)"))
     
     try:
         bot.remove_webhook()

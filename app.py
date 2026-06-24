@@ -31,7 +31,7 @@ NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
 ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
 HUNTER_KEY = os.environ.get("HUNTER_KEY")
-SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")  # Для обхода блокировок
+SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")
 APILAYER_KEY = os.environ.get("APILAYER_KEY")
 FULLCONTACT_KEY = os.environ.get("FULLCONTACT_KEY")
 
@@ -227,7 +227,6 @@ def safe_request(func):
     return wrapper
 
 def request_via_scraperapi(url: str) -> str:
-    """Обход блокировок через ScraperAPI (если есть ключ)"""
     if not SCRAPERAPI_KEY:
         return None
     try:
@@ -259,7 +258,6 @@ def detect_query_type(query: str) -> str:
 
 # ==================== ЛЕГАЛЬНЫЕ API ====================
 
-# ----- 1. Numverify (с ключом) -----
 @safe_request
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
@@ -279,7 +277,6 @@ async def numverify_lookup(phone: str) -> dict:
                     }
     return None
 
-# ----- 2. Veriphone (с ключом) -----
 @safe_request
 async def veriphone_lookup(phone: str) -> dict:
     if not VERIPHONE_KEY:
@@ -298,7 +295,6 @@ async def veriphone_lookup(phone: str) -> dict:
                     }
     return None
 
-# ----- 3. AbstractAPI (с ключом) -----
 @safe_request
 async def abstractapi_lookup(phone: str) -> dict:
     if not ABSTRACT_API_KEY:
@@ -318,7 +314,6 @@ async def abstractapi_lookup(phone: str) -> dict:
                     }
     return None
 
-# ----- 4. BigDataCloud (с ключом) -----
 @safe_request
 async def bigdatacloud_lookup(phone: str) -> dict:
     if not BIGDATACLOUD_KEY:
@@ -339,7 +334,6 @@ async def bigdatacloud_lookup(phone: str) -> dict:
                     }
     return None
 
-# ----- 5. OmkarCloud (с ключом) -----
 @safe_request
 async def omkarcloud_lookup(phone: str) -> dict:
     if not OMKAR_KEY:
@@ -359,7 +353,6 @@ async def omkarcloud_lookup(phone: str) -> dict:
                     }
     return None
 
-# ----- 6. HTMLWeb.ru (без ключа) -----
 @safe_request
 async def htmlweb_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
@@ -377,7 +370,6 @@ async def htmlweb_lookup(phone: str) -> dict:
                     }
     return None
 
-# ----- 7. HLR (smsc.ru) (без ключа) -----
 @safe_request
 async def hlr_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
@@ -389,7 +381,6 @@ async def hlr_lookup(phone: str) -> dict:
                 return {"status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
     return None
 
-# ----- 8. ip-api.com (без ключа) -----
 @safe_request
 async def ip_api_lookup(ip: str) -> dict:
     url = f"http://ip-api.com/json/{ip}"
@@ -407,7 +398,6 @@ async def ip_api_lookup(ip: str) -> dict:
                     }
     return None
 
-# ----- 9. Hunter.io (с ключом) -----
 @safe_request
 async def hunter_lookup(email: str) -> dict:
     if not HUNTER_KEY:
@@ -429,7 +419,6 @@ async def hunter_lookup(email: str) -> dict:
 
 # ==================== НОВЫЕ API ====================
 
-# ----- 10. PhoneRep (бесплатный API, без ключа) -----
 @safe_request
 async def phonerep_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
@@ -448,7 +437,6 @@ async def phonerep_lookup(phone: str) -> dict:
                 }
     return None
 
-# ----- 11. NumLookup (бесплатный API, 50 запросов/день без ключа) -----
 @safe_request
 async def numlookup_api(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
@@ -466,7 +454,6 @@ async def numlookup_api(phone: str) -> dict:
                     }
     return None
 
-# ----- 12. Zlookup (бесплатный API, без ключа) -----
 @safe_request
 async def zlookup_api(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
@@ -482,7 +469,6 @@ async def zlookup_api(phone: str) -> dict:
                 }
     return None
 
-# ----- 13. Clearbit (с ключом, но базовые данные без ключа) -----
 @safe_request
 async def clearbit_lookup(email: str) -> dict:
     url = f"https://clearbit.com/v2/people/find?email={email}"
@@ -500,7 +486,6 @@ async def clearbit_lookup(email: str) -> dict:
 
 # ==================== НЕЛЕГАЛЬНЫЕ/ПАРСИНГ API ====================
 
-# ----- 14. Hudson Rock (без ключа) -----
 @safe_request
 async def hudsonrock_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
@@ -517,7 +502,6 @@ async def hudsonrock_lookup(phone: str) -> dict:
                     }
     return None
 
-# ----- 15. HaveIBeenPwned (легальный, но часто блокирует) -----
 @safe_request
 async def hibp_lookup(email: str) -> list:
     url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
@@ -528,7 +512,6 @@ async def hibp_lookup(email: str) -> list:
                 return [b.get('Name') for b in data]
     return []
 
-# ----- 16. EmailRep (без ключа) -----
 @safe_request
 async def emailrep_lookup(email: str) -> dict:
     url = f"https://emailrep.io/{email}"
@@ -543,7 +526,6 @@ async def emailrep_lookup(email: str) -> dict:
                 }
     return None
 
-# ----- 17. ipinfo.io (без ключа, 50k/день) -----
 @safe_request
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
@@ -559,7 +541,6 @@ async def ipinfo_lookup(ip: str) -> dict:
                 }
     return None
 
-# ----- 18. GitHub API (без ключа, 60/час) -----
 @safe_request
 async def github_username_lookup(username: str) -> dict:
     url = f"https://api.github.com/users/{username}"
@@ -578,7 +559,6 @@ async def github_username_lookup(username: str) -> dict:
                 }
     return None
 
-# ----- 19. Telegram username (без ключа) -----
 @safe_request
 async def telegram_username_lookup(username: str) -> dict:
     try:
@@ -593,7 +573,7 @@ async def telegram_username_lookup(username: str) -> dict:
         pass
     return {"exists": False}
 
-# ==================== ПАРСЕРЫ ====================
+# ==================== ПАРСЕРЫ (С ЗАМЕНЁННЫМ HTML5LIB) ====================
 
 async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     headers = {
@@ -606,7 +586,6 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     }
     results = []
     try:
-        # Пробуем через ScraperAPI, если есть ключ
         html = None
         if SCRAPERAPI_KEY:
             html = request_via_scraperapi(url)
@@ -616,7 +595,8 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
                     if resp.status == 200:
                         html = await resp.text()
         if html:
-            soup = BeautifulSoup(html, 'html.parser')
+            # ВАЖНО: ЗАМЕНА НА HTML5LIB
+            soup = BeautifulSoup(html, 'html5lib')
             items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
             for item in items[:max_results]:
                 title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
@@ -637,7 +617,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
         logger.error(f"Parse error for {url}: {e}")
     return results
 
-# ----- 20-55. ПАРСЕРЫ ПО НОМЕРУ -----
+# ----- ВСЕ ПАРСЕРЫ (55+) -----
 
 async def freecarrier_lookup(phone: str) -> list:
     clean = re.sub(r'\D', '', phone)
@@ -720,7 +700,6 @@ async def yellowpages_lookup(phone: str) -> list:
     selectors = {"result": ".result, .business, .person", "title": ".name, .title", "text": ".address, .location", "extra": ".phone, .email"}
     return await parse_site(url, selectors, 5)
 
-# ----- СТАРЫЕ ПАРСЕРЫ -----
 async def truecaller_parse(phone: str) -> list:
     clean = re.sub(r'\D', '', phone)
     url = f"https://www.truecaller.com/search/{clean}"
@@ -889,7 +868,7 @@ async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
         pass
     return None
 
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК (55+ источников) ====================
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
@@ -908,7 +887,6 @@ async def global_lookup(query: str) -> dict:
     
     if qtype == "phone":
         tasks = [
-            # ЛЕГАЛЬНЫЕ API (с ключами)
             ("numverify", numverify_lookup(query)),
             ("veriphone", veriphone_lookup(query)),
             ("abstractapi", abstractapi_lookup(query)),
@@ -917,17 +895,11 @@ async def global_lookup(query: str) -> dict:
             ("htmlweb", htmlweb_lookup(query)),
             ("hlr", hlr_lookup(query)),
             ("numberlookup", numberlookup_api(query)),
-            
-            # НОВЫЕ API (без ключей)
             ("phonerep", phonerep_lookup(query)),
             ("numlookup", numlookup_api(query)),
             ("zlookup", zlookup_api(query)),
-            
-            # НЕЛЕГАЛЬНЫЕ/ПАРСИНГ
             ("hudsonrock", hudsonrock_lookup(query)),
             ("leadfinder", leadfinder_lookup(query)),
-            
-            # НОВЫЕ ПАРСЕРЫ (55+)
             ("freecarrier", freecarrier_lookup(query)),
             ("phoneowner", phoneowner_parse(query)),
             ("socialsearch", socialsearch_lookup(query)),
@@ -942,8 +914,6 @@ async def global_lookup(query: str) -> dict:
             ("pipl", pipl_lookup(query)),
             ("fouroneone", fouroneone_lookup(query)),
             ("yellowpages", yellowpages_lookup(query)),
-            
-            # СТАРЫЕ ПАРСЕРЫ
             ("xray", xray_lookup(query)),
             ("idcrawl", idcrawl_lookup(query)),
             ("syncme", syncme_lookup(query)),
@@ -959,7 +929,6 @@ async def global_lookup(query: str) -> dict:
             ("duckduckgo", duckduckgo_search(query)),
             ("wikipedia", wikipedia_lookup(query)),
         ]
-        
         if len(query.split()) >= 2:
             tasks.append(("fssp", fssp_lookup(query)))
     
@@ -1017,7 +986,7 @@ async def global_lookup(query: str) -> dict:
     result["total_results"] = total
     return result
 
-# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА (СТИЛЬ ШЕРЛОК/ГЛАЗ БОГА) ====================
+# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
 def generate_html_report(query: str, data: dict, report_id: str) -> str:
     sources = data.get("sources", {})
@@ -1362,7 +1331,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 """
     return html
 
-# ==================== МЕНЮ (СТИЛЬ ШЕРЛОК/ГЛАЗ БОГА) ====================
+# ==================== МЕНЮ ====================
 
 def main_menu_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)

@@ -24,9 +24,8 @@ import pytz
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 DB_PATH = os.path.join("/tmp", "otob_bot.db")
-SEARCH_TIMEOUT = 120  # 2 минуты
+SEARCH_TIMEOUT = 120
 
-# ===== КЛЮЧИ API (ОПЦИОНАЛЬНО) =====
 VERIPHONE_KEY = os.environ.get("VERIPHONE_KEY")
 OMKAR_KEY = os.environ.get("OMKAR_KEY")
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
@@ -41,7 +40,6 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== БАЗА ДАННЫХ ====================
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -138,14 +136,10 @@ def get_remaining(user_id: int) -> int:
     except:
         return 0
 
-# ==================== ХРАНИЛИЩЕ ОТЧЁТОВ ====================
 reports = {}
 
-# ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 bot.remove_webhook()
-
-# ==================== HTTP-СЕРВЕР ====================
 
 class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -196,17 +190,15 @@ def run_http_server():
 
 run_http_server()
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-
 ua = UserAgent()
 
 def generate_otob_title(query: str, qtype: str) -> str:
     templates = [
-        f"🔱 OTOB — VECTOR OSINT | {qtype.upper()} | {query}",
-        f"🕵️ OTOB | {query} | {qtype.upper()} | VECTOR Отчёт",
-        f"🎯 OTOB — VECTOR | {qtype} | {query}",
-        f"⚡ OTOB — Глаз Бога | {query} | {qtype.upper()}",
-        f"🔱 OTOB — VECTOR OSINT | {query} | {qtype.upper()}",
+        f"🔱 OTOB — OSINT Глобальный поиск | {qtype.upper()} | {query}",
+        f"🕵️ OTOB | {query} | {qtype.upper()} | Отчёт",
+        f"🎯 OTOB — Глаз Бога | {qtype} | {query}",
+        f"⚡ OTOB — Глобальный OSINT | {query} | {qtype.upper()}",
+        f"🔱 OTOB — OSINT | {query} | {qtype.upper()}",
     ]
     return random.choice(templates)
 
@@ -270,7 +262,6 @@ def detect_query_type(query: str) -> str:
 
 # ==================== ВСЕ ФУНКЦИИ ПОИСКА ====================
 
-# ----- PHONENUMBERS -----
 async def phonenumbers_info(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -292,7 +283,6 @@ async def phonenumbers_info(phone: str) -> dict:
         logger.error(f"Phonenumbers error: {e}")
         return None
 
-# ----- WHATSAPP -----
 async def whatsapp_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -305,7 +295,6 @@ async def whatsapp_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
-# ----- TELEGRAM -----
 async def telegram_phone_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -318,7 +307,6 @@ async def telegram_phone_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
-# ----- VIBER -----
 async def viber_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -329,7 +317,6 @@ async def viber_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
-# ----- TRUECALLER ENHANCED -----
 async def truecaller_enhanced(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -353,7 +340,6 @@ async def truecaller_enhanced(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- GETCONTACT ENHANCED -----
 async def getcontact_enhanced(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -376,7 +362,6 @@ async def getcontact_enhanced(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- SYNC.ME ENHANCED -----
 async def syncme_enhanced(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -398,7 +383,6 @@ async def syncme_enhanced(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- WHOSENO ENHANCED -----
 async def whoseno_enhanced(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -418,7 +402,6 @@ async def whoseno_enhanced(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- NUMBUSTER -----
 async def numbuster_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -437,7 +420,6 @@ async def numbuster_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- EYECON -----
 async def eyecon_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -457,7 +439,6 @@ async def eyecon_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- FACEBOOK BREACH -----
 async def facebook_breach_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -475,7 +456,6 @@ async def facebook_breach_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- BELLINGCAT -----
 async def bellingcat_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -494,7 +474,6 @@ async def bellingcat_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- IGNORANT -----
 async def ignorant_check(phone: str) -> list:
     results = []
     platforms = [
@@ -515,7 +494,6 @@ async def ignorant_check(phone: str) -> list:
             results.append({"platform": name, "exists": False})
     return results
 
-# ----- LEAKCHECK -----
 @safe_request
 async def leakcheck_lookup(query: str) -> dict:
     url = f"https://leakcheck.io/api/public?check={query}"
@@ -532,7 +510,6 @@ async def leakcheck_lookup(query: str) -> dict:
                     }
     return {"found": False}
 
-# ----- HUDSON ROCK -----
 @safe_request
 async def hudsonrock_lookup(phone: str) -> dict:
     clean = clean_phone(phone)
@@ -549,7 +526,6 @@ async def hudsonrock_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-# ----- SPAMCALLS -----
 async def spamcalls_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -567,7 +543,6 @@ async def spamcalls_check(phone: str) -> dict:
     except:
         return {"found": False, "spam_risk": "unknown"}
 
-# ----- HTMLWEB -----
 @safe_request
 async def htmlweb_lookup(phone: str) -> dict:
     clean = clean_phone(phone)
@@ -586,7 +561,6 @@ async def htmlweb_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-# ----- HLR -----
 @safe_request
 async def hlr_lookup(phone: str) -> dict:
     clean = clean_phone(phone)
@@ -598,7 +572,6 @@ async def hlr_lookup(phone: str) -> dict:
                 return {"found": True, "status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
     return {"found": False}
 
-# ----- WHITEPAGES -----
 async def whitepages_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -614,7 +587,6 @@ async def whitepages_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- FASTPEOPLESEARCH -----
 async def fastpeoplesearch_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -632,7 +604,6 @@ async def fastpeoplesearch_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- THATSTHEM -----
 async def thatsthem_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -650,7 +621,6 @@ async def thatsthem_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- REVEALNAME -----
 async def revealname_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -668,7 +638,6 @@ async def revealname_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- CALLERID -----
 async def callerid_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -686,7 +655,6 @@ async def callerid_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- SPYDIALER -----
 async def spydialer_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -702,7 +670,6 @@ async def spydialer_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- USPHONEBOOK -----
 async def usphonebook_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -720,7 +687,6 @@ async def usphonebook_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- SYNC.ME -----
 async def syncme_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -736,7 +702,6 @@ async def syncme_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- WHOSENO -----
 async def whoseno_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -754,37 +719,31 @@ async def whoseno_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- DUCKDUCKGO -----
 async def duckduckgo_search(query: str) -> list:
     url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
     return await parse_site(url, selectors, 5)
 
-# ----- SOCIALSEARCH -----
 async def socialsearch_lookup(query: str) -> list:
     url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
     return await parse_site(url, selectors, 5)
 
-# ----- PIPL -----
 async def pipl_lookup(query: str) -> list:
     url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
     return await parse_site(url, selectors, 5)
 
-# ----- X-RAY -----
 async def xray_lookup(query: str) -> list:
     url = f"https://x-ray.contact/search?q={query}"
     selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
     return await parse_site(url, selectors, 5)
 
-# ----- IDCRAWL -----
 async def idcrawl_lookup(query: str) -> list:
     url = f"https://idcrawl.com/{query}"
     selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
     return await parse_site(url, selectors, 5)
 
-# ----- TRUEPEOPLESEARCH -----
 async def truepeoplesearch_lookup(query: str) -> list:
     if re.search(r'\d', query):
         url = f"https://truepeoplesearch.com/results?phoneno={query}"
@@ -793,21 +752,18 @@ async def truepeoplesearch_lookup(query: str) -> list:
     selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
     return await parse_site(url, selectors, 5)
 
-# ----- FASTPEOPLESEARCH PARSE -----
 async def fastpeoplesearch_parse(phone: str) -> list:
     clean = clean_phone(phone)
     url = f"https://www.fastpeoplesearch.com/phone/{clean}"
     selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
     return await parse_site(url, selectors, 5)
 
-# ----- THATSTHEM PARSE -----
 async def thatsthem_lookup(phone: str) -> list:
     clean = clean_phone(phone)
     url = f"https://thatsthem.com/phone/{clean}"
     selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
     return await parse_site(url, selectors, 5)
 
-# ----- GOOGLE DORKS -----
 async def google_dorks_search(query: str) -> list:
     results = []
     dorks = [
@@ -881,7 +837,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 5) -> list:
         logger.error(f"Parse error for {url}: {e}")
     return results
 
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК (VECTOR СТИЛЬ) ====================
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
@@ -900,7 +856,6 @@ async def global_lookup(query: str) -> dict:
     
     if qtype == "phone":
         tasks = [
-            # ====== ОСНОВНЫЕ (VECTOR) ======
             ("phonenumbers", run_with_timeout(phonenumbers_info(query), 12)),
             ("whatsapp", run_with_timeout(whatsapp_check(query), 10)),
             ("telegram", run_with_timeout(telegram_phone_check(query), 10)),
@@ -913,20 +868,12 @@ async def global_lookup(query: str) -> dict:
             ("eyecon", run_with_timeout(eyecon_check(query), 12)),
             ("bellingcat", run_with_timeout(bellingcat_check(query), 12)),
             ("ignorant", run_with_timeout(ignorant_check(query), 12)),
-            
-            # ====== УТЕЧКИ ======
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 12)),
             ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 12)),
             ("facebook_breach", run_with_timeout(facebook_breach_check(query), 12)),
-            
-            # ====== СПАМ ======
             ("spamcalls", run_with_timeout(spamcalls_check(query), 10)),
-            
-            # ====== API ======
             ("htmlweb", run_with_timeout(htmlweb_lookup(query), 10)),
             ("hlr", run_with_timeout(hlr_lookup(query), 10)),
-            
-            # ====== ПАРСЕРЫ ======
             ("duckduckgo", run_with_timeout(duckduckgo_search(query), 15)),
             ("socialsearch", run_with_timeout(socialsearch_lookup(query), 12)),
             ("pipl", run_with_timeout(pipl_lookup(query), 12)),
@@ -997,7 +944,8 @@ async def global_lookup(query: str) -> dict:
     result["total_results"] = total
     return result
 
-# ----- ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ -----
+# ==================== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ====================
+
 @safe_request
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
@@ -1375,9 +1323,9 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         </div>
         <div class="header">
             <div>
-                <h1>🔱 OTOB <span>VECTOR</span></h1>
+                <h1>🔱 OTOB <span>OSINT</span></h1>
                 <div class="sub">⚡ Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
-                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 50+ источников · VECTOR OSINT</div>
+                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 50+ источников · Глобальный поиск</div>
             </div>
             <div><span class="badge badge-success">🎯 НАЙДЕНО: {total}</span></div>
         </div>
@@ -1473,7 +1421,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     
     html += f"""
         <div class="footer">
-            🔱 OTOB — VECTOR OSINT · <a href="https://t.me/OTOBsearch" target="_blank">@OTOBsearch</a>
+            🔱 OTOB — OSINT · <a href="https://t.me/OTOBsearch" target="_blank">@OTOBsearch</a>
         </div>
     </div>
 </body>
@@ -1481,7 +1429,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 """
     return html
 
-# ==================== МЕНЮ (VECTOR СТИЛЬ) ====================
+# ==================== МЕНЮ ====================
 
 def main_menu_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -1506,6 +1454,24 @@ def main_menu_keyboard():
     )
     return markup
 
+def functions_menu_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🌐 Глобальный поиск", callback_data="global_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📧 Email", callback_data="email_search"),
+        types.InlineKeyboardButton("📱 Телефон", callback_data="phone_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👤 Username", callback_data="username_search"),
+        types.InlineKeyboardButton("🌐 IP/Домен", callback_data="domain_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+    )
+    return markup
+
 # ==================== ОБРАБОТЧИКИ ====================
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -1515,14 +1481,31 @@ def callback_handler(call):
         
         if call.data == "menu_back":
             bot.edit_message_text(
-                "🔱 *OTOB — VECTOR OSINT*\n\n"
+                "🔱 *OTOB — OSINT*\n\n"
                 "🕵️ *Глобальный OSINT-поиск*\n"
-                "50+ источников · VECTOR стиль\n\n"
+                "50+ источников\n\n"
                 "⚡ *Выбери действие:*",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
                 reply_markup=main_menu_keyboard()
+            )
+            return
+        
+        if call.data == "menu_functions":
+            bot.edit_message_text(
+                "🔍 *Выбери функцию:*\n\n"
+                "📌 *Основной поиск:*\n"
+                "• 🌐 Глобальный — номер, email, ФИО, IP, домен\n\n"
+                "📌 *Быстрый поиск:*\n"
+                "• 📧 Email — проверка утечек\n"
+                "• 📱 Телефон — оператор, регион, владелец\n"
+                "• 👤 Username — поиск в соцсетях\n"
+                "• 🌐 IP/Домен — геолокация, WHOIS",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=functions_menu_keyboard()
             )
             return
         
@@ -1585,7 +1568,7 @@ def callback_handler(call):
                 "📊 *Лимит:* 3 поиска в день (сброс в 00:00 МСК)\n"
                 "👑 *Админ:* безлимитный доступ\n\n"
                 "🛡️ *Канал:* @OTOBsearch\n"
-                "🔱 *VECTOR OSINT*",
+                "🔱 *OTOB OSINT*",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1597,7 +1580,7 @@ def callback_handler(call):
         
         if call.data == "global_search":
             bot.edit_message_text(
-                "🔱 *ГЛОБАЛЬНЫЙ ПОИСК (VECTOR)*\n\n"
+                "🌐 *ГЛОБАЛЬНЫЙ ПОИСК*\n\n"
                 "Отправь запрос для поиска:\n"
                 "• 📱 Номер: `+79991234567`\n"
                 "• 👤 ФИО: `Иванов Иван Иванович`\n"
@@ -1637,7 +1620,7 @@ def callback_handler(call):
         
         if call.data == "phone_search":
             bot.edit_message_text(
-                "📱 *ПРОВЕРКА ТЕЛЕФОНА (VECTOR)*\n\n"
+                "📱 *ПРОВЕРКА ТЕЛЕФОНА*\n\n"
                 "Отправь номер для проверки.\n\n"
                 "Пример: `+79991234567`\n\n"
                 "🔍 Оператор · Страна · Регион\n"
@@ -1698,9 +1681,9 @@ def start_command(message):
         remaining = get_remaining(message.from_user.id)
         bot.send_message(
             message.chat.id,
-            f"🔱 *OTOB — VECTOR OSINT*\n\n"
+            f"🔱 *OTOB — OSINT*\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
-            f"⚡ Глобальный OSINT-поиск (VECTOR)\n\n"
+            f"⚡ Глобальный OSINT-поиск\n\n"
             f"📊 *Осталось:* {remaining}/3\n\n"
             f"📌 *Выбери действие:*",
             parse_mode="Markdown",
@@ -1788,7 +1771,7 @@ def handle_text(message):
         start_time = time.time()
         msg = bot.reply_to(
             message,
-            "🔱 *VECTOR OSINT — сканирование...*\n"
+            "🔱 *OSINT — сканирование...*\n"
             "⏱️ Время: до 2 минут\n"
             "🕵️ 50+ источников...",
             parse_mode="Markdown"
@@ -1840,7 +1823,7 @@ def handle_text(message):
             bot.send_document(
                 chat_id,
                 f,
-                caption=f"🔱 *VECTOR OSINT-ОТЧЁТ*\n\n"
+                caption=f"🔱 *OSINT-ОТЧЁТ*\n\n"
                         f"🔍 Запрос: `{text}`\n"
                         f"📌 Найдено: **{total}**\n"
                         f"🔍 Осталось: **{remaining}/3**\n"
@@ -1863,7 +1846,7 @@ def handle_text(message):
 
 if __name__ == "__main__":
     init_db()
-    logger.info("🔱 OTOB — VECTOR OSINT запускается...")
+    logger.info("🔱 OTOB — OSINT запускается...")
     logger.info("🛡️ Канал: @OTOBsearch")
     logger.info("⚡ Таймаут поиска: 2 минуты")
     

@@ -19,23 +19,26 @@ from fake_useragent import UserAgent
 import phonenumbers
 from phonenumbers import carrier, geocoder, timezone as phone_timezone
 import pytz
+import dns.resolver
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 DB_PATH = os.path.join("/tmp", "glaz_isidy_bot.db")
-SEARCH_TIMEOUT = 90
+SEARCH_TIMEOUT = 120
 
-# ===== КЛЮЧИ API (ОПЦИОНАЛЬНО) =====
-VERIPHONE_KEY = os.environ.get("VERIPHONE_KEY")
-OMKAR_KEY = os.environ.get("OMKAR_KEY")
+# ===== КЛЮЧИ API =====
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
 ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
-BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
 HUNTER_KEY = os.environ.get("HUNTER_KEY")
+IPINFO_KEY = os.environ.get("IPINFO_KEY")
+SHODAN_KEY = os.environ.get("SHODAN_KEY")
+VIRUSTOTAL_KEY = os.environ.get("VIRUSTOTAL_KEY")
+EMAILREP_KEY = os.environ.get("EMAILREP_KEY")
 DEHASHED_KEY = os.environ.get("DEHASHED_KEY")
 DEHASHED_EMAIL = os.environ.get("DEHASHED_EMAIL")
-PROBIVON_KEY = os.environ.get("PROBIVON_KEY")
+INTELX_KEY = os.environ.get("INTELX_KEY")
+WHATCMS_KEY = os.environ.get("WHATCMS_KEY")
 
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
@@ -201,7 +204,6 @@ def generate_title(query: str, qtype: str) -> str:
         f"🕵️ Глаз Исиды | {query} | {qtype.upper()} | Отчёт",
         f"🎯 Глаз Исиды — OSINT | {qtype} | {query}",
         f"⚡ Глаз Исиды — Глобальный OSINT | {query} | {qtype.upper()}",
-        f"👁️ Глаз Исиды — OSINT | {query} | {qtype.upper()}",
     ]
     return random.choice(templates)
 
@@ -223,7 +225,7 @@ def safe_request(func):
             return None
     return wrapper
 
-async def run_with_timeout(coro, timeout=8):
+async def run_with_timeout(coro, timeout=10):
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
@@ -250,9 +252,135 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== ОСНОВНЫЕ ФУНКЦИИ ПОИСКА (60+ ИСТОЧНИКОВ) ====================
+# ==================== ДАРКНЕТ ИНСТРУМЕНТЫ ====================
 
-# ----- 1. PHONENUMBERS (локальный анализ) -----
+async def ahmia_search(query: str) -> list:
+    """Поиск .onion сайтов через Ahmia (парсинг)"""
+    try:
+        url = f"https://ahmia.fi/search/?q={query}"
+        headers = {"User-Agent": ua.random}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    results = []
+                    for item in soup.select('.result'):
+                        title = item.select_one('h4 a')
+                        desc = item.select_one('.description')
+                        if title:
+                            link = title.get('href')
+                            if link and not link.startswith('http'):
+                                link = f"https://ahmia.fi{link}"
+                            results.append({
+                                "title": title.get_text(strip=True)[:80] if title else "—",
+                                "link": link or "—",
+                                "text": desc.get_text(strip=True)[:200] if desc else "—"
+                            })
+                    return results
+    except Exception as e:
+        logger.error(f"Ahmia error: {e}")
+    return []
+
+async def exonera_check(ip: str) -> dict:
+    """Проверка IP через Exonera Tor (база Tor-релеев)"""
+    try:
+        url = f"https://exonerator.torproject.org/api/?ip={ip}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {
+                        "found": True,
+                        "is_tor": data.get('is_tor', False),
+                        "first_seen": data.get('first_seen', '—'),
+                        "last_seen": data.get('last_seen', '—')
+                    }
+    except Exception as e:
+        logger.error(f"Exonera error: {e}")
+    return {"found": False}
+
+async def darksearch_lookup(query: str) -> list:
+    """Поиск через DarkSearch API (публичный)"""
+    try:
+        url = f"https://darksearch.io/api/search?q={query}"
+        headers = {"User-Agent": ua.random}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('results', [])[:5]
+    except Exception as e:
+        logger.error(f"DarkSearch error: {e}")
+    return []
+
+# ==================== INTELX (ДАРКНЕТ, УТЕЧКИ) ====================
+
+async def intelx_lookup(query: str) -> dict:
+    """IntelX — поиск в даркнете, утечки, Tor, I2P"""
+    if not INTELX_KEY:
+        return None
+    
+    try:
+        search_url = "https://2.intelx.io/phonebook/search"
+        headers = {"x-key": INTELX_KEY}
+        payload = {"term": query, "maxresults": 10, "media": 0}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(search_url, headers=headers, json=payload, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                search_data = await resp.json()
+                search_id = search_data.get('id')
+                if not search_id:
+                    return None
+            
+            await asyncio.sleep(2)
+            result_url = f"https://2.intelx.io/phonebook/search/result?id={search_id}"
+            async with session.get(result_url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('totalResults', 0) > 0:
+                        return {
+                            "found": True,
+                            "total": data.get('totalResults', 0),
+                            "results": data.get('selectors', [])[:5]
+                        }
+                return {"found": False}
+    except Exception as e:
+        logger.error(f"IntelX error: {e}")
+        return {"found": False}
+
+# ==================== WHATCMS (ОПРЕДЕЛЕНИЕ CMS) ====================
+
+async def whatcms_lookup(domain: str) -> dict:
+    """WhatCMS — определяет CMS сайта (WordPress, Joomla, Drupal и др.)"""
+    if not WHATCMS_KEY:
+        return None
+    
+    try:
+        url = f"https://whatcms.org/APIEndpoint?key={WHATCMS_KEY}&url={domain}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('result', {}).get('code') == 200:
+                        result = data.get('result', {})
+                        return {
+                            "found": True,
+                            "cms": result.get('name', '—'),
+                            "version": result.get('version', '—'),
+                            "cms_url": result.get('cms_url', '—'),
+                            "confidence": result.get('confidence', '—')
+                        }
+                return {"found": False}
+    except Exception as e:
+        logger.error(f"WhatCMS error: {e}")
+        return {"found": False}
+
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ПОИСКА ====================
+
+# ----- PHONENUMBERS -----
 async def phonenumbers_info(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -274,692 +402,40 @@ async def phonenumbers_info(phone: str) -> dict:
         logger.error(f"Phonenumbers error: {e}")
         return None
 
-# ----- 2. WHATSAPP -----
+# ----- WHATSAPP -----
 async def whatsapp_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
         url = f"https://wa.me/{clean}"
-        headers = {"User-Agent": ua.random}
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=5, allow_redirects=False) as resp:
+            async with session.get(url, timeout=5, allow_redirects=False) as resp:
                 if resp.status == 200 or resp.status == 302:
                     return {"found": True, "exists": True, "url": f"https://wa.me/{clean}"}
                 return {"found": False, "exists": False}
     except:
         return {"found": False, "exists": False}
 
-# ----- 3. TELEGRAM -----
+# ----- TELEGRAM -----
 async def telegram_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
         url = f"https://t.me/+{clean}"
-        headers = {"User-Agent": ua.random}
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=5, allow_redirects=False) as resp:
+            async with session.get(url, timeout=5, allow_redirects=False) as resp:
                 if resp.status == 200 or resp.status == 302:
                     return {"found": True, "exists": True, "url": f"https://t.me/+{clean}"}
                 return {"found": False, "exists": False}
     except:
         return {"found": False, "exists": False}
 
-# ----- 4. VIBER -----
-async def viber_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.viber.com/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=5, allow_redirects=False) as resp:
-                return {"found": resp.status == 200, "exists": resp.status == 200}
-    except:
-        return {"found": False, "exists": False}
-
-# ----- 5. TRUECALLER (имя владельца) -----
-async def truecaller_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.truecaller.com/search/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=8) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title|fullname'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 6. GETCONTACT (как записан в контактах) -----
-async def getcontact_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.getcontact.com/ru/search/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=8) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    names = soup.find_all('span', class_=re.compile('name|title|contact'))
-                    if names:
-                        return {
-                            "found": True,
-                            "names": [n.get_text(strip=True) for n in names[:10]],
-                            "source": "GetContact"
-                        }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 7. SYNC.ME (имя + спам) -----
-async def syncme_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://sync.me/search?q={clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title'))
-                    spam = soup.find('span', class_=re.compile('spam|risk'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—",
-                        "spam_level": spam.get_text(strip=True) if spam else "—"
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 8. WHOSENO (имя владельца) -----
-async def whoseno_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://whoseno.com/search?q={clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|result|contact'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—"
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 9. NUMBUSTER (имя + платформы) -----
-async def numbuster_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://numbuster.com/api/search?phone={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=6) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('found'):
-                        return {
-                            "found": True,
-                            "names": data.get('names', []),
-                            "platforms": data.get('platforms', [])
-                        }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 10. EYECON (имя владельца) -----
-async def eyecon_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://eyecon-app.com/search?phone={clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—"
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 11. BELLINGCAT (Telegram) -----
-async def bellingcat_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://bellingcat.com/api/telegram/check?phone={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=6) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "found": True,
-                        "has_telegram": data.get('has_telegram', False),
-                        "telegram_id": data.get('telegram_id', '—'),
-                        "telegram_username": data.get('telegram_username', '—')
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 12. FACEBOOK BREACH (утечка) -----
-async def facebook_breach_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://haveibeenzuckered.com/api/check?phone={clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=6) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "found": True,
-                        "in_breach": data.get('in_breach', False),
-                        "breach_date": data.get('breach_date', '—')
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 13. SPAMCALLS (спам-риск) -----
-async def spamcalls_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://spamcalls.net/ru/number/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    if "спам" in html.lower() or "мошенник" in html.lower():
-                        return {"found": True, "spam_risk": "high"}
-                    elif "не спам" in html.lower():
-                        return {"found": True, "spam_risk": "low"}
-                return {"found": False, "spam_risk": "unknown"}
-    except:
-        return {"found": False, "spam_risk": "unknown"}
-
-# ----- 14. HTMLWEB (оператор, регион) -----
-async def htmlweb_public(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data:
-                    return {
-                        "found": True,
-                        "country": data.get('country', '—'),
-                        "operator": data.get('operator', '—'),
-                        "region": data.get('region', '—'),
-                        "timezone": data.get('timezone', '—')
-                    }
-    return {"found": False}
-
-# ----- 15. HLR (активность) -----
-async def hlr_public(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://smsc.ru/testhlr.php?phone={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.text()
-                return {"found": True, "status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
-    return {"found": False}
-
-# ----- 16. NUMLOOKUP (страна, оператор) -----
-async def numlookup_public(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://api.numlookup.com/validate?number={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('valid'):
-                    return {
-                        "found": True,
-                        "country": data.get('country_name', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "line_type": data.get('line_type', '—'),
-                        "location": data.get('location', '—')
-                    }
-    return {"found": False}
-
-# ----- 17. PHONEREP (спам-риск) -----
-async def phonerep_public(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://phonerep.com/api?phone={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "found": True,
-                    "country": data.get('country', '—'),
-                    "carrier": data.get('carrier', '—'),
-                    "line_type": data.get('line_type', '—'),
-                    "spam_risk": data.get('spam_risk', 0)
-                }
-    return {"found": False}
-
-# ----- 18. ZLOOKUP (валидация) -----
-async def zlookup_public(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://api.zlookup.com/validate?number={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "found": True,
-                    "valid": data.get('valid', False),
-                    "country": data.get('country', '—'),
-                    "carrier": data.get('carrier', '—')
-                }
-    return {"found": False}
-
-# ----- 19. NUMBERLOOKUP -----
-async def numberlookup_public(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://numberlookupapi.com/api?number={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('valid'):
-                    return {
-                        "found": True,
-                        "country": data.get('country', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "line_type": data.get('line_type', '—')
-                    }
-    return {"found": False}
-
-# ----- 20. LEAKCHECK (утечки) -----
-async def leakcheck_public(query: str) -> dict:
-    url = f"https://leakcheck.io/api/public?check={query}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=6) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('found'):
-                    return {
-                        "found": True,
-                        "sources": data.get('sources', [])[:5],
-                        "password": data.get('password', '—'),
-                        "hash": data.get('hash', '—')
-                    }
-    return {"found": False}
-
-# ----- 21. HUDSON ROCK (утечки) -----
-async def hudsonrock_public(phone: str) -> dict:
-    clean = clean_phone(phone)
-    url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=6) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('total_results', 0) > 0:
-                    return {
-                        "found": True,
-                        "total": data.get('total_results', 0),
-                        "breaches": data.get('results', [])[:5]
-                    }
-    return {"found": False}
-
-# ----- 22. HIBP (утечки email) -----
-async def hibp_public(email: str) -> list:
-    url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=6) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return [b.get('Name') for b in data]
-    return []
-
-# ----- 23. EMAILREP (репутация email) -----
-async def emailrep_public(email: str) -> dict:
-    url = f"https://emailrep.io/{email}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=6) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "found": True,
-                    "reputation": data.get('reputation', '—'),
-                    "suspicious": data.get('suspicious', False),
-                    "references": data.get('references', 0)
-                }
-    return {"found": False}
-
-# ----- 24. DUCKDUCKGO -----
-async def ddg_search(query: str) -> list:
-    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 25. SOCIALSEARCH (соцсети) -----
-async def socialsearch_lookup(query: str) -> list:
-    url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 26. PIPL (поиск людей) -----
-async def pipl_lookup(query: str) -> list:
-    url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 27. X-RAY (адреса, фото) -----
-async def xray_lookup(query: str) -> list:
-    url = f"https://x-ray.contact/search?q={query}"
-    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 28. IDCRAWL -----
-async def idcrawl_lookup(query: str) -> list:
-    url = f"https://idcrawl.com/{query}"
-    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 29. TRUEPEOPLESEARCH (адреса, родственники) -----
-async def truepeoplesearch_lookup(query: str) -> list:
-    if re.search(r'\d', query):
-        url = f"https://truepeoplesearch.com/results?phoneno={query}"
-    else:
-        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
-    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 30. FASTPEOPLESEARCH -----
-async def fastpeoplesearch_parse(phone: str) -> list:
-    clean = clean_phone(phone)
-    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 31. THATSTHEM (возраст, родственники) -----
-async def thatsthem_lookup(phone: str) -> list:
-    clean = clean_phone(phone)
-    url = f"https://thatsthem.com/phone/{clean}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
-    return await parse_site(url, selectors, 5)
-
-# ----- 32. WHITEPAGES -----
-async def whitepages_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.whitepages.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    if "No results found" not in html:
-                        return {"found": True}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 33. FASTPEOPLESEARCH (проверка) -----
-async def fastpeoplesearch_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('h1', class_=re.compile('name|title|fullname'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 34. THATSTHEM (проверка) -----
-async def thatsthem_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://thatsthem.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|fullname'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 35. REVEALNAME -----
-async def revealname_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://revealname.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|owner|result'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 36. CALLERID -----
-async def callerid_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://callerid.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('h1', class_=re.compile('name|title'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 37. SPYDIALER -----
-async def spydialer_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.spydialer.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    if "No records found" not in html:
-                        return {"found": True}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 38. USPHONEBOOK -----
-async def usphonebook_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.usphonebook.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|fullname'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 39. 411.COM -----
-async def fouroneone_check(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.411.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=6) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|result'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 40. CB-PHONEHUNTER (агрегатор) -----
-async def cb_phonehunter(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        result = {"found": False}
-        
-        try:
-            url = f"https://www.truecaller.com/search/{clean}"
-            headers = {"User-Agent": ua.random}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=6) as resp:
-                    if resp.status == 200:
-                        html = await resp.text()
-                        soup = BeautifulSoup(html, 'html5lib')
-                        name = soup.find('div', class_=re.compile('name|title|fullname'))
-                        if name:
-                            result['truecaller_name'] = name.get_text(strip=True)
-                            result['found'] = True
-        except:
-            pass
-        
-        try:
-            url = f"https://wa.me/{clean}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5, allow_redirects=False) as resp:
-                    result['whatsapp'] = resp.status in [200, 302]
-                    if result['whatsapp']:
-                        result['found'] = True
-        except:
-            result['whatsapp'] = False
-        
-        try:
-            url = f"https://t.me/+{clean}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5, allow_redirects=False) as resp:
-                    result['telegram'] = resp.status in [200, 302]
-                    if result['telegram']:
-                        result['found'] = True
-        except:
-            result['telegram'] = False
-        
-        return result
-    except:
-        return {"found": False}
-
-# ----- 41. LEAKER (агрегатор утечек) -----
-async def leaker_lookup(query: str) -> dict:
-    try:
-        results = {"found": False, "sources": []}
-        
-        try:
-            url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={query}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=6) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get('total_results', 0) > 0:
-                            results['found'] = True
-                            results['sources'].append({
-                                "source": "Hudson Rock",
-                                "total": data.get('total_results', 0),
-                                "breaches": data.get('results', [])[:3]
-                            })
-        except:
-            pass
-        
-        try:
-            url = f"https://leakcheck.io/api/public?check={query}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=6) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get('found'):
-                            results['found'] = True
-                            results['sources'].append({
-                                "source": "LeakCheck",
-                                "sources": data.get('sources', [])[:3],
-                                "password": data.get('password', '—')
-                            })
-        except:
-            pass
-        
-        return results
-    except:
-        return {"found": False}
-
-# ----- 42. TELESPOTTER (поиск по людям) -----
-async def telespotter_lookup(phone: str) -> list:
-    try:
-        clean = clean_phone(phone)
-        results = []
-        sites = [
-            ("whitepages", f"https://www.whitepages.com/phone/{clean}"),
-            ("truepeoplesearch", f"https://truepeoplesearch.com/results?phoneno={clean}"),
-            ("fastpeoplesearch", f"https://www.fastpeoplesearch.com/phone/{clean}"),
-        ]
-        for name, url in sites:
-            try:
-                headers = {"User-Agent": ua.random}
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers, timeout=6) as resp:
-                        if resp.status == 200:
-                            html = await resp.text()
-                            soup = BeautifulSoup(html, 'html5lib')
-                            name_elem = soup.find('h1', class_=re.compile('name|title|fullname'))
-                            if name_elem:
-                                name_text = name_elem.get_text(strip=True)
-                                if name_text and len(name_text) > 2:
-                                    results.append({"source": name, "name": name_text, "url": url})
-            except:
-                continue
-        return results
-    except:
-        return []
-
-# ----- 43. NUMVERIFY (с ключом) -----
+# ----- NUMVERIFY -----
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
         return None
     clean = clean_phone(phone)
     url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=6) as resp:
+        async with session.get(url, timeout=8) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -972,14 +448,14 @@ async def numverify_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-# ----- 44. ABSTRACTAPI (с ключом) -----
+# ----- ABSTRACTAPI -----
 async def abstractapi_lookup(phone: str) -> dict:
     if not ABSTRACT_API_KEY:
         return None
     clean = clean_phone(phone)
     url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=6) as resp:
+        async with session.get(url, timeout=8) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -992,7 +468,156 @@ async def abstractapi_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-# ----- 45. DEHASHED (утечки с адресами) -----
+# ----- HUNTER.IO -----
+async def hunter_lookup(email: str) -> dict:
+    if not HUNTER_KEY:
+        return None
+    url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                result = data.get('data', {})
+                return {
+                    "found": True,
+                    "status": result.get('status', '—'),
+                    "score": result.get('score', 0),
+                    "first_name": result.get('first_name', '—'),
+                    "last_name": result.get('last_name', '—'),
+                    "company": result.get('company', '—')
+                }
+    return {"found": False}
+
+# ----- EMAILREP -----
+async def emailrep_lookup(email: str) -> dict:
+    url = f"https://emailrep.io/{email}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "reputation": data.get('reputation', '—'),
+                    "suspicious": data.get('suspicious', False),
+                    "references": data.get('references', 0)
+                }
+    return {"found": False}
+
+# ----- LEAKCHECK -----
+async def leakcheck_lookup(query: str) -> dict:
+    url = f"https://leakcheck.io/api/public?check={query}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('found'):
+                    return {
+                        "found": True,
+                        "sources": data.get('sources', [])[:5],
+                        "password": data.get('password', '—'),
+                        "hash": data.get('hash', '—')
+                    }
+    return {"found": False}
+
+# ----- HUDSON ROCK -----
+async def hudsonrock_lookup(phone: str) -> dict:
+    clean = clean_phone(phone)
+    url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('total_results', 0) > 0:
+                    return {
+                        "found": True,
+                        "total": data.get('total_results', 0),
+                        "breaches": data.get('results', [])[:5]
+                    }
+    return {"found": False}
+
+# ----- HIBP -----
+async def hibp_lookup(email: str) -> list:
+    url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return [b.get('Name') for b in data]
+    return []
+
+# ----- IPINFO -----
+async def ipinfo_lookup(ip: str) -> dict:
+    url = f"https://ipinfo.io/{ip}/json"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "country": data.get('country', '—'),
+                    "city": data.get('city', '—'),
+                    "region": data.get('region', '—'),
+                    "org": data.get('org', '—')
+                }
+    return {"found": False}
+
+# ----- IP-API -----
+async def ip_api_lookup(ip: str) -> dict:
+    url = f"http://ip-api.com/json/{ip}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('status') == 'success':
+                    return {
+                        "found": True,
+                        "country": data.get('country', '—'),
+                        "city": data.get('city', '—'),
+                        "region": data.get('regionName', '—'),
+                        "isp": data.get('isp', '—'),
+                        "asn": data.get('as', '—')
+                    }
+    return {"found": False}
+
+# ----- SHODAN -----
+async def shodan_lookup(ip: str) -> dict:
+    if not SHODAN_KEY:
+        return None
+    url = f"https://api.shodan.io/shodan/host/{ip}?key={SHODAN_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": True,
+                    "country": data.get('country_name', '—'),
+                    "city": data.get('city', '—'),
+                    "org": data.get('org', '—'),
+                    "isp": data.get('isp', '—'),
+                    "ports": data.get('ports', [])[:5]
+                }
+    return {"found": False}
+
+# ----- VIRUSTOTAL -----
+async def virustotal_lookup(domain: str) -> dict:
+    if not VIRUSTOTAL_KEY:
+        return None
+    url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+    headers = {"x-apikey": VIRUSTOTAL_KEY}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=8) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                attributes = data.get('data', {}).get('attributes', {})
+                return {
+                    "found": True,
+                    "reputation": attributes.get('reputation', 0),
+                    "malicious": attributes.get('last_analysis_stats', {}).get('malicious', 0),
+                    "suspicious": attributes.get('last_analysis_stats', {}).get('suspicious', 0)
+                }
+    return {"found": False}
+
+# ----- DEHASHED -----
 async def dehashed_lookup(query: str) -> dict:
     if not DEHASHED_KEY or not DEHASHED_EMAIL:
         return None
@@ -1009,26 +634,158 @@ async def dehashed_lookup(query: str) -> dict:
                 }
     return {"found": False}
 
-# ----- 46. PROBIVON (глубокий пробив) -----
-async def probivon_lookup(query: str) -> dict:
-    if not PROBIVON_KEY:
-        return None
-    url = f"https://api.probivon.com/v1/search?q={query}"
-    headers = {"Authorization": f"Bearer {PROBIVON_KEY}"}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=8) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "found": True,
-                    "name": data.get('name', '—'),
-                    "address": data.get('address', '—'),
-                    "social": data.get('social_networks', []),
-                    "breaches": data.get('breaches', [])
-                }
-    return {"found": False}
+# ----- DUCKDUCKGO -----
+async def ddg_search(query: str) -> list:
+    url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
+    return await parse_site(url, selectors, 5)
 
-# ----- 47. GOOGLE DORKS -----
+# ----- SOCIALSEARCH -----
+async def socialsearch_lookup(query: str) -> list:
+    url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
+    return await parse_site(url, selectors, 5)
+
+# ----- PIPL -----
+async def pipl_lookup(query: str) -> list:
+    url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
+    return await parse_site(url, selectors, 5)
+
+# ----- X-RAY -----
+async def xray_lookup(query: str) -> list:
+    url = f"https://x-ray.contact/search?q={query}"
+    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 5)
+
+# ----- IDCRAWL -----
+async def idcrawl_lookup(query: str) -> list:
+    url = f"https://idcrawl.com/{query}"
+    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 5)
+
+# ----- TRUEPEOPLESEARCH -----
+async def truepeoplesearch_lookup(query: str) -> list:
+    if re.search(r'\d', query):
+        url = f"https://truepeoplesearch.com/results?phoneno={query}"
+    else:
+        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
+    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
+    return await parse_site(url, selectors, 5)
+
+# ----- FASTPEOPLESEARCH -----
+async def fastpeoplesearch_parse(phone: str) -> list:
+    clean = clean_phone(phone)
+    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
+    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
+    return await parse_site(url, selectors, 5)
+
+# ----- THATSTHEM -----
+async def thatsthem_lookup(phone: str) -> list:
+    clean = clean_phone(phone)
+    url = f"https://thatsthem.com/phone/{clean}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
+    return await parse_site(url, selectors, 5)
+
+# ----- WHITEPAGES -----
+async def whitepages_check(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://www.whitepages.com/phone/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    if "No results found" not in html:
+                        return {"found": True}
+                return {"found": False}
+    except:
+        return {"found": False}
+
+# ----- REVEALNAME -----
+async def revealname_check(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://revealname.com/phone/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|owner|result'))
+                    if name:
+                        return {"found": True, "name": name.get_text(strip=True)}
+                return {"found": False}
+    except:
+        return {"found": False}
+
+# ----- CALLERID -----
+async def callerid_check(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://callerid.com/phone/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('h1', class_=re.compile('name|title'))
+                    if name:
+                        return {"found": True, "name": name.get_text(strip=True)}
+                return {"found": False}
+    except:
+        return {"found": False}
+
+# ----- SPYDIALER -----
+async def spydialer_check(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://www.spydialer.com/phone/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    if "No records found" not in html:
+                        return {"found": True}
+                return {"found": False}
+    except:
+        return {"found": False}
+
+# ----- USPHONEBOOK -----
+async def usphonebook_check(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://www.usphonebook.com/phone/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|fullname'))
+                    if name:
+                        return {"found": True, "name": name.get_text(strip=True)}
+                return {"found": False}
+    except:
+        return {"found": False}
+
+# ----- 411.COM -----
+async def fouroneone_check(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://www.411.com/phone/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|result'))
+                    if name:
+                        return {"found": True, "name": name.get_text(strip=True)}
+                return {"found": False}
+    except:
+        return {"found": False}
+
+# ----- GOOGLE DORKS -----
 async def google_dorks_search(query: str) -> list:
     results = []
     dorks = [
@@ -1041,21 +798,14 @@ async def google_dorks_search(query: str) -> list:
         f'site:truecaller.com "{query}"',
         f'site:getcontact.com "{query}"',
         f'site:avito.ru "{query}"',
-        f'site:auto.ru "{query}"',
-        f'"телефон" "{query}"',
-        f'"тел" "{query}"',
         f'"{query}" "адрес"',
         f'"{query}" "улица"',
-        f'"{query}" "дом"',
-        f'"{query}" "квартира"',
-        f'"{query}" "родственник"',
     ]
-    for dork in dorks[:6]:
+    for dork in dorks[:5]:
         try:
             url = f"https://html.duckduckgo.com/html/?q={dork.replace(' ', '+')}"
-            headers = {"User-Agent": ua.random}
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=6) as resp:
+                async with session.get(url, timeout=8) as resp:
                     if resp.status == 200:
                         html = await resp.text()
                         soup = BeautifulSoup(html, 'html5lib')
@@ -1067,6 +817,22 @@ async def google_dorks_search(query: str) -> list:
         except:
             continue
     return results
+
+# ----- DNS ENUM -----
+async def dns_enum(domain: str) -> list:
+    try:
+        records = ['A', 'MX', 'NS', 'TXT', 'CNAME', 'SOA']
+        results = []
+        for record in records:
+            try:
+                answers = dns.resolver.resolve(domain, record)
+                for rdata in answers:
+                    results.append({"record": record, "value": str(rdata)})
+            except:
+                continue
+        return results
+    except:
+        return []
 
 # ==================== ПАРСЕР ====================
 
@@ -1082,7 +848,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 5) -> list:
     results = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=8) as resp:
+            async with session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     soup = BeautifulSoup(html, 'html5lib')
@@ -1125,111 +891,82 @@ async def global_lookup(query: str) -> dict:
     
     if qtype == "phone":
         tasks = [
-            # ====== ЛОКАЛЬНЫЙ АНАЛИЗ ======
-            ("phonenumbers", run_with_timeout(phonenumbers_info(query), 5)),
-            
-            # ====== МЕССЕНДЖЕРЫ ======
-            ("whatsapp", run_with_timeout(whatsapp_check(query), 5)),
-            ("telegram", run_with_timeout(telegram_check(query), 5)),
-            ("viber", run_with_timeout(viber_check(query), 5)),
-            ("bellingcat", run_with_timeout(bellingcat_check(query), 5)),
-            
-            # ====== ИМЯ ВЛАДЕЛЬЦА (ГЛУБОКИЙ ПОИСК) ======
-            ("truecaller", run_with_timeout(truecaller_check(query), 6)),
-            ("getcontact", run_with_timeout(getcontact_check(query), 6)),
-            ("syncme", run_with_timeout(syncme_check(query), 5)),
-            ("whoseno", run_with_timeout(whoseno_check(query), 5)),
-            ("eyecon", run_with_timeout(eyecon_check(query), 5)),
-            ("numbuster", run_with_timeout(numbuster_check(query), 6)),
-            ("revealname", run_with_timeout(revealname_check(query), 5)),
-            ("callerid", run_with_timeout(callerid_check(query), 5)),
-            ("spydialer", run_with_timeout(spydialer_check(query), 5)),
-            ("usphonebook", run_with_timeout(usphonebook_check(query), 5)),
-            ("fouroneone", run_with_timeout(fouroneone_check(query), 5)),
-            
-            # ====== АДРЕСА И РОДСТВЕННИКИ ======
-            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 6)),
-            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 5)),
-            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 5)),
-            ("whitepages", run_with_timeout(whitepages_check(query), 5)),
-            ("fastpeoplesearch_check", run_with_timeout(fastpeoplesearch_check(query), 5)),
-            ("thatsthem_check", run_with_timeout(thatsthem_check(query), 5)),
-            
-            # ====== API БЕЗ КЛЮЧЕЙ ======
-            ("htmlweb", run_with_timeout(htmlweb_public(query), 5)),
-            ("hlr", run_with_timeout(hlr_public(query), 5)),
-            ("numlookup", run_with_timeout(numlookup_public(query), 5)),
-            ("phonerep", run_with_timeout(phonerep_public(query), 5)),
-            ("zlookup", run_with_timeout(zlookup_public(query), 5)),
-            ("numberlookup", run_with_timeout(numberlookup_public(query), 5)),
-            
-            # ====== УТЕЧКИ ======
-            ("leakcheck", run_with_timeout(leakcheck_public(query), 5)),
-            ("hudsonrock", run_with_timeout(hudsonrock_public(query), 5)),
-            ("facebook_breach", run_with_timeout(facebook_breach_check(query), 5)),
-            ("leaker", run_with_timeout(leaker_lookup(query), 6)),
-            ("dehashed", run_with_timeout(dehashed_lookup(query), 6)),
-            ("probivon", run_with_timeout(probivon_lookup(query), 8)),
-            
-            # ====== СПАМ ======
-            ("spamcalls", run_with_timeout(spamcalls_check(query), 5)),
-            
-            # ====== ПОИСК В ИНТЕРНЕТЕ ======
-            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 5)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 5)),
-            ("xray", run_with_timeout(xray_lookup(query), 5)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 5)),
-            ("cb_phonehunter", run_with_timeout(cb_phonehunter(query), 6)),
-            ("telespotter", run_with_timeout(telespotter_lookup(query), 6)),
-            ("google_dorks", run_with_timeout(google_dorks_search(query), 6)),
-            
-            # ====== API С КЛЮЧАМИ ======
-            ("numverify", run_with_timeout(numverify_lookup(query), 5)),
-            ("abstractapi", run_with_timeout(abstractapi_lookup(query), 5)),
+            ("phonenumbers", run_with_timeout(phonenumbers_info(query), 8)),
+            ("whatsapp", run_with_timeout(whatsapp_check(query), 6)),
+            ("telegram", run_with_timeout(telegram_check(query), 6)),
+            ("numverify", run_with_timeout(numverify_lookup(query), 8)),
+            ("abstractapi", run_with_timeout(abstractapi_lookup(query), 8)),
+            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
+            ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 8)),
+            ("dehashed", run_with_timeout(dehashed_lookup(query), 8)),
+            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 8)),
+            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 6)),
+            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 6)),
+            ("whitepages", run_with_timeout(whitepages_check(query), 6)),
+            ("revealname", run_with_timeout(revealname_check(query), 6)),
+            ("callerid", run_with_timeout(callerid_check(query), 6)),
+            ("spydialer", run_with_timeout(spydialer_check(query), 6)),
+            ("usphonebook", run_with_timeout(usphonebook_check(query), 6)),
+            ("fouroneone", run_with_timeout(fouroneone_check(query), 6)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
+            ("xray", run_with_timeout(xray_lookup(query), 6)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
+            ("google_dorks", run_with_timeout(google_dorks_search(query), 8)),
+            ("ahmia", run_with_timeout(ahmia_search(query), 12)),
+            ("darksearch", run_with_timeout(darksearch_lookup(query), 10)),
         ]
     
     elif qtype == "email":
         tasks = [
-            ("hibp", run_with_timeout(hibp_public(query), 5)),
-            ("emailrep", run_with_timeout(emailrep_public(query), 5)),
-            ("leakcheck", run_with_timeout(leakcheck_public(query), 5)),
-            ("hudsonrock", run_with_timeout(hudsonrock_public(query), 5)),
-            ("dehashed", run_with_timeout(dehashed_lookup(query), 6)),
-            ("probivon", run_with_timeout(probivon_lookup(query), 8)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 5)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 5)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
-            ("leaker", run_with_timeout(leaker_lookup(query), 6)),
+            ("hunter", run_with_timeout(hunter_lookup(query), 8)),
+            ("emailrep", run_with_timeout(emailrep_lookup(query), 8)),
+            ("hibp", run_with_timeout(hibp_lookup(query), 8)),
+            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
+            ("dehashed", run_with_timeout(dehashed_lookup(query), 8)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("ahmia", run_with_timeout(ahmia_search(query), 12)),
+            ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
     
     elif qtype == "username":
         tasks = [
-            ("xray", run_with_timeout(xray_lookup(query), 5)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 5)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 5)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 5)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
-            ("leakcheck", run_with_timeout(leakcheck_public(query), 5)),
-            ("leaker", run_with_timeout(leaker_lookup(query), 6)),
-            ("probivon", run_with_timeout(probivon_lookup(query), 8)),
+            ("xray", run_with_timeout(xray_lookup(query), 6)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
+            ("ahmia", run_with_timeout(ahmia_search(query), 12)),
+            ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
     
     elif qtype == "ip":
         tasks = [
-            ("ipinfo", run_with_timeout(ipinfo_lookup(query), 5)),
-            ("ip_api", run_with_timeout(ip_api_lookup(query), 5)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
+            ("ipinfo", run_with_timeout(ipinfo_lookup(query), 6)),
+            ("ip_api", run_with_timeout(ip_api_lookup(query), 6)),
+            ("shodan", run_with_timeout(shodan_lookup(query), 8)),
+            ("exonera", run_with_timeout(exonera_check(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
         ]
     
     elif qtype == "domain":
         tasks = [
-            ("crtsh", run_with_timeout(crtsh_lookup(query), 5)),
-            ("whois", run_with_timeout(whois_lookup(query), 5)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 6)),
+            ("virustotal", run_with_timeout(virustotal_lookup(query), 8)),
+            ("dns_enum", run_with_timeout(dns_enum(query), 8)),
+            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("ahmia", run_with_timeout(ahmia_search(query), 12)),
+            ("whatcms", run_with_timeout(whatcms_lookup(query), 8)),
         ]
     else:
-        tasks = [("duckduckgo", run_with_timeout(ddg_search(query), 6))]
+        tasks = [
+            ("duckduckgo", run_with_timeout(ddg_search(query), 8)),
+            ("ahmia", run_with_timeout(ahmia_search(query), 12)),
+            ("intelx", run_with_timeout(intelx_lookup(query), 10)),
+        ]
     
     if tasks:
         results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
@@ -1246,64 +983,6 @@ async def global_lookup(query: str) -> dict:
     result["total_results"] = total
     return result
 
-# ==================== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-async def ipinfo_lookup(ip: str) -> dict:
-    url = f"https://ipinfo.io/{ip}/json"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "found": True,
-                    "country": data.get('country', '—'),
-                    "city": data.get('city', '—'),
-                    "region": data.get('region', '—'),
-                    "org": data.get('org', '—')
-                }
-    return {"found": False}
-
-async def ip_api_lookup(ip: str) -> dict:
-    url = f"http://ip-api.com/json/{ip}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get('status') == 'success':
-                    return {
-                        "found": True,
-                        "country": data.get('country', '—'),
-                        "city": data.get('city', '—'),
-                        "region": data.get('regionName', '—'),
-                        "isp": data.get('isp', '—'),
-                        "asn": data.get('as', '—')
-                    }
-    return {"found": False}
-
-async def crtsh_lookup(domain: str) -> list:
-    url = f"https://crt.sh/?q={domain}&output=json"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data:
-                    return [{"domain": item.get('name_value', '—')} for item in data[:5]]
-    return []
-
-async def whois_lookup(domain: str) -> dict:
-    url = f"https://api.whois.vu/?q={domain}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {
-                    "found": True,
-                    "registrar": data.get('registrar', '—'),
-                    "creation_date": data.get('creation_date', '—'),
-                    "expiration_date": data.get('expiration_date', '—')
-                }
-    return {"found": False}
-
 # ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
 def generate_html_report(query: str, data: dict, report_id: str) -> str:
@@ -1314,47 +993,18 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     all_results = []
     for source_name, items in sources.items():
         if not items:
-            all_results.append({
-                "title": f"⚠️ {source_name} — нет данных",
-                "_source": source_name,
-                "text": "",
-                "extra": "",
-                "empty": True
-            })
             continue
-        
         if isinstance(items, list):
-            if not items:
-                all_results.append({
-                    "title": f"⚠️ {source_name} — пустой список",
-                    "_source": source_name,
-                    "text": "",
-                    "extra": "",
-                    "empty": True
-                })
-            else:
-                for item in items:
-                    if isinstance(item, dict):
-                        item['_source'] = source_name
-                        all_results.append(item)
-                    else:
-                        all_results.append({
-                            "title": str(item),
-                            "_source": source_name,
-                            "text": "",
-                            "extra": ""
-                        })
+            for item in items:
+                if isinstance(item, dict):
+                    item['_source'] = source_name
+                    all_results.append(item)
+                else:
+                    all_results.append({"title": str(item), "_source": source_name})
         elif isinstance(items, dict):
             item_copy = items.copy()
             item_copy['_source'] = source_name
             all_results.append(item_copy)
-        else:
-            all_results.append({
-                "title": str(items),
-                "_source": source_name,
-                "text": "",
-                "extra": ""
-            })
     
     display_results = all_results
     title = generate_title(query, qtype)
@@ -1371,30 +1021,22 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&display=swap');
         body {{
             background: #0a0a0a;
-            background-image: radial-gradient(ellipse at center, #1a0a0a 0%, #0a0a0a 100%);
             color: #d0c0c0;
-            font-family: 'Cinzel', 'Segoe UI', serif;
+            font-family: 'Cinzel', serif;
             padding: 30px 20px;
-            line-height: 1.6;
-            min-height: 100vh;
         }}
         .container {{
             max-width: 1200px;
             margin: 0 auto;
-            background: linear-gradient(145deg, #0d0a0a, #150d0d);
+            background: #0d0a0a;
             border-radius: 16px;
-            padding: 40px 45px;
+            padding: 40px;
             border: 1px solid #3a1a1a;
-            box-shadow: 0 0 60px rgba(200,0,0,0.05), 0 0 120px rgba(200,0,0,0.02);
-            position: relative;
         }}
         .watermark {{
             position: absolute;
             top: 25px;
             left: 30px;
-            z-index: 10;
-            user-select: none;
-            pointer-events: none;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -1408,10 +1050,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             font-size: 16px;
             font-weight: 900;
             letter-spacing: 6px;
-            margin-top: 4px;
-            text-transform: uppercase;
             font-family: 'Cinzel', serif;
-            text-shadow: 0 0 20px rgba(200,0,0,0.3);
         }}
         .header {{
             border-bottom: 2px solid #3a1a1a;
@@ -1419,104 +1058,41 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             margin-bottom: 28px;
             display: flex;
             justify-content: space-between;
-            align-items: flex-start;
-            flex-wrap: wrap;
             padding-left: 90px;
         }}
         .header h1 {{
             font-size: 28px;
-            font-weight: 700;
             color: #cc3333;
             letter-spacing: 3px;
-            text-shadow: 0 0 30px rgba(200,0,0,0.15);
             font-family: 'Cinzel', serif;
         }}
-        .header h1 span {{
-            color: #ff4444;
-            background: #1a0a0a;
-            padding: 0 14px;
-            border-radius: 4px;
-            border: 1px solid #3a1a1a;
-        }}
-        .header .sub {{
-            color: #7a4a4a;
-            font-size: 13px;
-            margin-top: 6px;
-            font-family: 'Courier New', monospace;
-            letter-spacing: 1px;
-        }}
-        .badge {{
-            display: inline-block;
-            background: #1a0a0a;
-            padding: 6px 18px;
-            border-radius: 8px;
-            font-size: 13px;
-            color: #cc3333;
-            border: 1px solid #3a1a1a;
-            font-weight: 600;
-            letter-spacing: 2px;
-            font-family: 'Cinzel', serif;
-        }}
-        .badge-success {{ background: #1a0a0a; color: #ff4444; border-color: #4a1a1a; }}
+        .header h1 span {{ color: #ff4444; background: #1a0a0a; padding: 0 14px; border-radius: 4px; border: 1px solid #3a1a1a; }}
+        .header .sub {{ color: #7a4a4a; font-size: 13px; font-family: 'Courier New', monospace; }}
+        .badge {{ background: #1a0a0a; padding: 6px 18px; border-radius: 8px; color: #cc3333; border: 1px solid #3a1a1a; }}
         .stats-bar {{
             display: flex;
             gap: 20px;
-            flex-wrap: wrap;
-            margin: 20px 0 25px 0;
+            margin: 20px 0;
             padding: 15px 20px;
             background: #0a0808;
             border-radius: 8px;
             border: 1px solid #2a1212;
         }}
-        .stats-bar .stat {{
-            font-size: 13px;
-            color: #6a3a3a;
-            font-family: 'Courier New', monospace;
-        }}
-        .stats-bar .stat strong {{
-            color: #cc3333;
-        }}
+        .stats-bar .stat {{ color: #6a3a3a; font-family: 'Courier New', monospace; }}
+        .stats-bar .stat strong {{ color: #cc3333; }}
         .result-item {{
             margin: 14px 0;
             padding: 16px 22px;
             background: #0a0808;
             border-radius: 10px;
             border-left: 4px solid #3a1a1a;
-            transition: 0.25s;
             border: 1px solid #1a0a0a;
         }}
-        .result-item:hover {{
-            background: #120a0a;
-            border-left-color: #cc3333;
-            border-color: #3a1a1a;
-            box-shadow: 0 0 30px rgba(200,0,0,0.03);
-        }}
-        .result-item .title {{
-            font-size: 17px;
-            font-weight: 500;
-            color: #d0b0b0;
-            font-family: 'Cinzel', serif;
-        }}
-        .result-item .title a {{
-            color: #cc5555;
-            text-decoration: none;
-            border-bottom: 1px dotted #3a1a1a;
-        }}
-        .result-item .title a:hover {{
-            color: #ff6666;
-        }}
-        .result-item .text {{
-            font-size: 14px;
-            color: #8a6a6a;
-            margin-top: 6px;
-            font-family: 'Segoe UI', sans-serif;
-        }}
-        .result-item .extra {{
-            font-size: 13px;
-            color: #6a4a4a;
-            margin-top: 4px;
-            font-family: 'Courier New', monospace;
-        }}
+        .result-item:hover {{ background: #120a0a; border-left-color: #cc3333; border-color: #3a1a1a; }}
+        .result-item .title {{ font-size: 17px; color: #d0b0b0; font-family: 'Cinzel', serif; }}
+        .result-item .title a {{ color: #cc5555; text-decoration: none; border-bottom: 1px dotted #3a1a1a; }}
+        .result-item .text {{ font-size: 14px; color: #8a6a6a; margin-top: 6px; font-family: 'Segoe UI', sans-serif; }}
+        .result-item .extra {{ font-size: 13px; color: #6a4a4a; margin-top: 4px; font-family: 'Courier New', monospace; }}
         .result-item .index {{
             display: inline-block;
             background: #1a0a0a;
@@ -1526,10 +1102,8 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border-radius: 6px;
             margin-right: 12px;
             border: 1px solid #2a1212;
-            font-weight: 600;
         }}
         .source-tag {{
-            display: inline-block;
             background: #1a0a0a;
             color: #8a4a4a;
             font-size: 10px;
@@ -1537,29 +1111,19 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border-radius: 4px;
             margin-left: 10px;
             border: 1px solid #2a1212;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
             font-family: 'Courier New', monospace;
         }}
-        .empty-tag {{
-            display: inline-block;
-            background: #1a0808;
-            color: #6a3a3a;
+        .darknet-tag {{
+            background: #1a0a1a;
+            color: #aa44aa;
             font-size: 10px;
             padding: 2px 10px;
             border-radius: 4px;
             margin-left: 10px;
-            border: 1px solid #3a1a1a;
+            border: 1px solid #3a1a3a;
+            font-family: 'Courier New', monospace;
         }}
-        .empty {{
-            color: #4a2a2a;
-            font-style: italic;
-            font-size: 15px;
-            padding: 30px;
-            text-align: center;
-            border: 1px dashed #2a1212;
-            border-radius: 8px;
-        }}
+        .empty {{ color: #4a2a2a; font-style: italic; padding: 30px; text-align: center; border: 1px dashed #2a1212; border-radius: 8px; }}
         .footer {{
             margin-top: 30px;
             padding-top: 20px;
@@ -1569,11 +1133,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             text-align: center;
             font-family: 'Courier New', monospace;
         }}
-        .footer a {{
-            color: #6a3a3a;
-            text-decoration: none;
-            border-bottom: 1px dotted #3a1a1a;
-        }}
+        .footer a {{ color: #6a3a3a; text-decoration: none; border-bottom: 1px dotted #3a1a1a; }}
         .footer a:hover {{ color: #cc4444; }}
         .scanline {{
             position: fixed;
@@ -1605,8 +1165,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
                 <circle cx="48" cy="43" r="2" fill="#ff6666" opacity="0.6"/>
                 <path d="M32 28 L42 22" stroke="#cc3333" stroke-width="2.5" stroke-linecap="round"/>
                 <path d="M68 28 L58 22" stroke="#cc3333" stroke-width="2.5" stroke-linecap="round"/>
-                <line x1="15" y1="85" x2="50" y2="50" stroke="#6a2a2a" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.3"/>
-                <line x1="85" y1="85" x2="50" y2="50" stroke="#6a2a2a" stroke-width="0.8" stroke-dasharray="3,3" opacity="0.3"/>
                 <text x="50" y="98" font-family="Cinzel, serif" font-size="10" fill="#cc3333" text-anchor="middle" letter-spacing="3">ГЛАЗ ИСИДЫ</text>
             </svg>
             <div class="text">ГЛАЗ ИСИДЫ</div>
@@ -1615,14 +1173,13 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             <div>
                 <h1>👁️ Глаз Исиды <span>OSINT</span></h1>
                 <div class="sub">⚡ Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
-                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 60+ источников · Глубокий OSINT</div>
+                <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ 35+ источников · Глубокий OSINT · Даркнет</div>
             </div>
-            <div><span class="badge badge-success">🎯 НАЙДЕНО: {total}</span></div>
+            <div><span class="badge">🎯 НАЙДЕНО: {total}</span></div>
         </div>
         <div class="stats-bar">
             <span class="stat">📊 Всего результатов: <strong>{total}</strong></span>
-            <span class="stat">🔍 Всего источников: <strong>{len(sources)}</strong></span>
-            <span class="stat">📦 Показано: <strong>{len(display_results)}</strong></span>
+            <span class="stat">🔍 Источников с данными: <strong>{len(display_results)}</strong></span>
             <span class="stat">⚡ Статус: <strong style="color:#cc3333;">АКТИВЕН</strong></span>
         </div>
 """
@@ -1631,45 +1188,16 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         for idx, item in enumerate(display_results, 1):
             source = item.get('_source', '')
             title = item.get('title', '—')
-            
-            if item.get('empty'):
-                html += f"""
-        <div class="result-item" style="border-left-color: #2a1212; opacity: 0.5;">
-            <div class="title">
-                <span class="index">#{idx}</span>
-                {title}
-                <span class="empty-tag">⚠️ ПУСТО</span>
-                <span class="source-tag">{source[:15]}</span>
-            </div>
-        </div>
-"""
-                continue
-            
             if isinstance(title, bool):
                 title = "✅ Да" if title else "❌ Нет"
-            elif title == '' or title == '—':
-                title = '—'
             title = str(title)[:80]
-            
-            text = item.get('text', '')
-            if isinstance(text, bool):
-                text = "✅ Да" if text else "❌ Нет"
-            elif text == '' or text == '—':
-                text = ''
-            text = str(text)[:250]
-            
+            text = item.get('text', '')[:250] if item.get('text') else ''
             extra = item.get('extra', '')
-            if isinstance(extra, bool):
-                extra = "✅ Да" if extra else "❌ Нет"
-            elif extra == '' or extra == '—':
-                extra = ''
-            extra = str(extra)
-            
             link = item.get('link', '')
             
             details = []
             for key, value in item.items():
-                if key in ['_source', 'title', 'text', 'extra', 'link', 'found', 'exists', 'empty']:
+                if key in ['_source', 'title', 'text', 'extra', 'link', 'found', 'exists']:
                     continue
                 if value and value != '—' and value != '':
                     if isinstance(value, str):
@@ -1681,12 +1209,16 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
                             if v and v != '—':
                                 details.append(f"{key}.{k}: {v}")
             
+            is_darknet = source in ['ahmia', 'darksearch', 'exonera', 'intelx']
+            tag_class = 'darknet-tag' if is_darknet else 'source-tag'
+            tag_icon = '🧅 ' if is_darknet else ''
+            
             html += f"""
         <div class="result-item">
             <div class="title">
                 <span class="index">#{idx}</span>
-                {title if title else '—'}
-                <span class="source-tag">{source[:15] if source else 'unknown'}</span>
+                {title}
+                <span class="{tag_class}">{tag_icon}{source[:12]}</span>
                 {f'<a href="{link}" target="_blank">🔗</a>' if link else ''}
             </div>
 """
@@ -1697,13 +1229,12 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             if details:
                 for detail in details[:8]:
                     html += f"            <div class=\"extra\">• {detail}</div>\n"
-            if not text and not extra and not details:
-                html += f"            <div class=\"extra\" style=\"color:#4a2a2a;\">⚠️ Нет данных для отображения</div>\n"
             html += "        </div>\n"
         
         html += f"""
         <div style="text-align:center; margin-top:20px; padding:12px; border:1px solid #2a1212; border-radius:8px; color:#5a3a3a; font-size:13px;">
-            📊 Показано {len(display_results)} из {total} найденных результатов
+            📊 Показано {len(display_results)} реальных результатов
+            <span style="margin-left:15px; color:#aa44aa;">🧅 Даркнет-источники помечены</span>
         </div>
 """
     else:
@@ -1773,30 +1304,13 @@ def callback_handler(call):
             bot.edit_message_text(
                 "👁️ *Глаз Исиды — OSINT*\n\n"
                 "🕵️ *Глубокий OSINT-поиск*\n"
-                "60+ источников\n"
-                "ФИО · Адреса · Родственники · Утечки\n\n"
+                "35+ источников\n"
+                "ФИО · Адреса · Утечки · Соцсети · Даркнет\n\n"
                 "⚡ *Выбери действие:*",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
                 reply_markup=main_menu_keyboard()
-            )
-            return
-        
-        if call.data == "menu_functions":
-            bot.edit_message_text(
-                "🔍 *Выбери функцию:*\n\n"
-                "📌 *Основной поиск:*\n"
-                "• 🌐 Глобальный — номер, email, ФИО, IP, домен\n\n"
-                "📌 *Быстрый поиск:*\n"
-                "• 📧 Email — проверка утечек\n"
-                "• 📱 Телефон — оператор, регион, владелец\n"
-                "• 👤 Username — поиск в соцсетях\n"
-                "• 🌐 IP/Домен — геолокация, WHOIS",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=functions_menu_keyboard()
             )
             return
         
@@ -1856,6 +1370,11 @@ def callback_handler(call):
                 "📌 *Как пользоваться:*\n"
                 "• Отправь номер, email, никнейм, IP или домен\n"
                 "• Глобальный поиск — всё в одном запросе\n\n"
+                "🧅 *Даркнет:*\n"
+                "• Ahmia — поиск .onion сайтов\n"
+                "• DarkSearch — поиск в даркнете\n"
+                "• Exonera Tor — проверка IP в сети Tor\n"
+                "• IntelX — утечки, Tor, I2P\n\n"
                 "📊 *Лимит:* 5 поисков в день (сброс в 00:00 МСК)\n"
                 "👑 *Админ:* безлимитный доступ\n\n"
                 "🛡️ *Канал:* @Arhapov\n"
@@ -1878,11 +1397,10 @@ def callback_handler(call):
                 "• 📧 Email: `user@example.com`\n"
                 "• 🆔 Никнейм: `username`\n"
                 "• 🌐 IP: `8.8.8.8`\n"
-                "• 🌍 Домен: `example.com`\n"
-                "• 📝 Любой текст\n\n"
-                "⚡ *60+ OSINT-источников*\n"
-                "🕵️ ФИО · Адреса · Родственники · Утечки\n"
-                "📱 WhatsApp · Telegram · Viber · Truecaller · GetContact",
+                "• 🌍 Домен: `example.com`\n\n"
+                "⚡ *35+ OSINT-источников*\n"
+                "🕵️ ФИО · Адреса · Утечки · Соцсети\n"
+                "🧅 Даркнет: Ahmia · DarkSearch · Exonera Tor · IntelX",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1895,11 +1413,10 @@ def callback_handler(call):
         if call.data == "email_search":
             bot.edit_message_text(
                 "📧 *ПРОВЕРКА EMAIL*\n\n"
-                "Отправь email для проверки утечек.\n\n"
+                "Отправь email для проверки.\n\n"
                 "Пример: `user@example.com`\n\n"
-                "🔍 Проверка в базах утечек (LeakCheck, Hudson Rock, Dehashed)\n"
-                "📊 Репутация (EmailRep)\n"
-                "🏢 Компания (Clearbit, Hunter)",
+                "🔍 Утечки · Репутация · Компания\n"
+                "🧅 Поиск в даркнете (Ahmia, IntelX)",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1914,10 +1431,8 @@ def callback_handler(call):
                 "📱 *ПРОВЕРКА ТЕЛЕФОНА*\n\n"
                 "Отправь номер для проверки.\n\n"
                 "Пример: `+79991234567`\n\n"
-                "🔍 Оператор · Страна · Регион\n"
-                "🕵️ ФИО · Адреса · Родственники\n"
-                "📱 WhatsApp · Telegram · Viber\n"
-                "⚡ 45+ источников по номеру + утечки",
+                "🔍 ФИО · Адреса · Утечки · Соцсети\n"
+                "🧅 Поиск в даркнете (Ahmia, IntelX)",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1930,11 +1445,10 @@ def callback_handler(call):
         if call.data == "username_search":
             bot.edit_message_text(
                 "👤 *ПОИСК ПО USERNAME*\n\n"
-                "Отправь никнейм для поиска в соцсетях.\n\n"
+                "Отправь никнейм для поиска.\n\n"
                 "Пример: `username`\n\n"
-                "🔍 GitHub · Telegram · Соцсети\n"
-                "🕵️ Pipl · SocialSearch · X-Ray\n"
-                "💀 Утечки · Даркнет",
+                "🔍 GitHub · Telegram · Соцсети · Утечки\n"
+                "🧅 Поиск в даркнете (Ahmia, IntelX)",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1950,8 +1464,8 @@ def callback_handler(call):
                 "Отправь IP или домен.\n\n"
                 "Пример IP: `8.8.8.8`\n"
                 "Пример домена: `example.com`\n\n"
-                "🔍 Геолокация · WHOIS · SSL-сертификаты\n"
-                "💀 Shodan · Censys · VirusTotal",
+                "🔍 Геолокация · WHOIS · SSL · DNS · CMS\n"
+                "🧅 Проверка Tor-релея (Exonera) · Поиск в даркнете",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1975,7 +1489,8 @@ def start_command(message):
             f"👁️ *Глаз Исиды — OSINT*\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
             f"⚡ Глубокий OSINT-поиск\n"
-            f"🛡️ 60+ источников\n\n"
+            f"🛡️ 35+ источников\n"
+            f"🧅 Даркнет: Ahmia · DarkSearch · Exonera · IntelX\n\n"
             f"📊 *Осталось:* {remaining}/5\n\n"
             f"📌 *Выбери действие:*",
             parse_mode="Markdown",
@@ -2065,8 +1580,8 @@ def handle_text(message):
             message,
             "👁️ *Глаз Исиды — глубокое сканирование...*\n"
             "⏱️ Время: до 90 секунд\n"
-            "🕵️ 60+ источников...\n"
-            "📋 Ищу ФИО · Адреса · Родственников · Утечки",
+            "🕵️ 35+ источников...\n"
+            "🧅 Поиск в даркнете...",
             parse_mode="Markdown"
         )
         
@@ -2080,8 +1595,7 @@ def handle_text(message):
             except asyncio.TimeoutError:
                 bot.edit_message_text(
                     "⚠️ *Поиск прерван по таймауту (90 секунд)*\n\n"
-                    "📌 Показаны только быстрые результаты.\n"
-                    "🔄 Попробуй повторить запрос позже.",
+                    "📌 Показаны только быстрые результаты.",
                     chat_id,
                     msg.message_id,
                     parse_mode="Markdown"
@@ -2099,7 +1613,6 @@ def handle_text(message):
             return
         
         elapsed = time.time() - start_time
-        
         total = data.get("total_results", 0)
         remaining = use_search(user_id)
         
@@ -2121,6 +1634,7 @@ def handle_text(message):
                         f"📌 Найдено: **{total}**\n"
                         f"🔍 Осталось: **{remaining}/5**\n"
                         f"⏱️ Время: **{elapsed:.1f} сек**\n"
+                        f"🧅 Даркнет: Ahmia · DarkSearch · IntelX\n"
                         f"🛡️ @Arhapov",
                 parse_mode="Markdown"
             )
@@ -2142,7 +1656,8 @@ if __name__ == "__main__":
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
     logger.info("🛡️ Канал: @Arhapov")
     logger.info("⚡ Таймаут поиска: 90 секунд")
-    logger.info("📊 60+ источников: ФИО · Адреса · Родственники · Утечки")
+    logger.info("📊 35+ источников: ФИО · Адреса · Утечки · Соцсети")
+    logger.info("🧅 Даркнет: Ahmia · DarkSearch · Exonera Tor · IntelX · WhatCMS")
     logger.info("👁️ С поддержкой Архапова")
     
     try:

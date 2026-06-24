@@ -573,7 +573,7 @@ async def telegram_username_lookup(username: str) -> dict:
         pass
     return {"exists": False}
 
-# ==================== ПАРСЕРЫ (С ЗАМЕНЁННЫМ HTML5LIB) ====================
+# ==================== ПАРСЕРЫ (С HTML5LIB) ====================
 
 async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
     headers = {
@@ -595,7 +595,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
                     if resp.status == 200:
                         html = await resp.text()
         if html:
-            # ВАЖНО: ЗАМЕНА НА HTML5LIB
+            # ИСПОЛЬЗУЕМ HTML5LIB ВМЕСТО LXML
             soup = BeautifulSoup(html, 'html5lib')
             items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
             for item in items[:max_results]:
@@ -1650,7 +1650,7 @@ def users_command(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
-# ==================== ОБРАБОТЧИК ТЕКСТА ====================
+# ==================== ОБРАБОТЧИК ТЕКСТА (ИСПРАВЛЕННЫЙ) ====================
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
@@ -1675,10 +1675,18 @@ def handle_text(message):
             parse_mode="Markdown"
         )
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        data = loop.run_until_complete(global_lookup(text))
-        loop.close()
+        # ======== ФИКС АСИНХРОНА ========
+        try:
+            data = asyncio.run(global_lookup(text))
+        except Exception as e:
+            logger.error(f"❌ Ошибка выполнения поиска: {e}")
+            bot.edit_message_text(
+                f"⚠️ Ошибка при выполнении поиска: {str(e)[:100]}",
+                chat_id,
+                msg.message_id
+            )
+            return
+        # =================================
         
         elapsed = time.time() - start_time
         
@@ -1717,11 +1725,22 @@ def handle_text(message):
         except:
             pass
 
-# ==================== ЗАПУСК ====================
+# ==================== ЗАПУСК (С ФИКСАМИ) ====================
 
 if __name__ == "__main__":
     init_db()
     logger.info("🚀 OTOB бот запускается...")
     logger.info("🛡️ Канал: @OTOBsearch")
-    bot.remove_webhook()
-    bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    
+    # ПРИНУДИТЕЛЬНЫЙ СБРОС WEBHOOK
+    try:
+        bot.remove_webhook()
+        logger.info("✅ Webhook удалён")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка удаления webhook: {e}")
+    
+    # НЕБОЛЬШАЯ ЗАДЕРЖКА
+    time.sleep(2)
+    
+    # ЗАПУСК С ОЧИСТКОЙ
+    bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)

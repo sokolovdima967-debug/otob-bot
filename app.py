@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup
 import telebot
 from telebot import types
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from fake_useragent import UserAgent
+import cloudscraper
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
@@ -29,6 +31,12 @@ ABSTRACT_API_KEY = os.environ.get("ABSTRACT_API_KEY")
 BIGDATACLOUD_KEY = os.environ.get("BIGDATACLOUD_KEY")
 HUNTER_KEY = os.environ.get("HUNTER_KEY")
 SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")
+MAILBOXLAYER_KEY = os.environ.get("MAILBOXLAYER_KEY")
+DEHASHED_EMAIL = os.environ.get("DEHASHED_EMAIL")
+DEHASHED_KEY = os.environ.get("DEHASHED_KEY")
+SNUSOM_KEY = os.environ.get("SNUSOM_KEY")
+BREACHCOMPANY_KEY = os.environ.get("BREACHCOMPANY_KEY")
+DORKSEARCH_KEY = os.environ.get("DORKSEARCH_KEY")
 
 if not TOKEN:
     raise ValueError("❌ TOKEN не установлен!")
@@ -48,12 +56,6 @@ def init_db():
                 searches_today INTEGER DEFAULT 0,
                 searches_extra INTEGER DEFAULT 0,
                 last_reset DATE DEFAULT CURRENT_DATE
-            )
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                user_id INTEGER PRIMARY KEY,
-                subscribed BOOLEAN DEFAULT 1
             )
         ''')
         conn.commit()
@@ -199,6 +201,8 @@ run_http_server()
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
+ua = UserAgent()
+
 def generate_otob_title(query: str, qtype: str) -> str:
     templates = [
         f"🔍 OTOB — OSINT Глобальный поиск | {qtype.upper()} | {query}",
@@ -227,13 +231,22 @@ def safe_request(func):
             return None
     return wrapper
 
+async def run_with_timeout(coro, timeout=10):
+    """Запускает корутину с таймаутом (по умолчанию 10 секунд)"""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
+    except Exception:
+        return None
+
 def request_via_scraperapi(url: str) -> str:
     if not SCRAPERAPI_KEY:
         return None
     try:
         import requests
         proxy_url = f"https://api.scraperapi.com?api_key={SCRAPERAPI_KEY}&url={url}"
-        response = requests.get(proxy_url, timeout=30)
+        response = requests.get(proxy_url, timeout=10)
         if response.status_code == 200:
             return response.text
     except:
@@ -266,7 +279,7 @@ async def numverify_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.numverify.com/validate?access_key={NUMVERIFY_KEY}&number={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -285,7 +298,7 @@ async def veriphone_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.veriphone.io/v2/verify?phone=%2B{clean}&key={VERIPHONE_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('phone_valid'):
@@ -303,7 +316,7 @@ async def abstractapi_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://phonevalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&phone={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -322,7 +335,7 @@ async def bigdatacloud_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.bigdatacloud.net/data/phone-validate?phoneNumber=%2B{clean}&key={BIGDATACLOUD_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -343,7 +356,7 @@ async def omkarcloud_lookup(phone: str) -> dict:
     url = f"https://carrier-lookup-api.omkar.cloud/lookup?phone=%2B{clean}"
     headers = {"API-Key": OMKAR_KEY}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, timeout=30) as resp:
+        async with session.get(url, headers=headers, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('is_valid_number'):
@@ -359,7 +372,7 @@ async def htmlweb_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data:
@@ -376,7 +389,7 @@ async def hlr_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://smsc.ru/testhlr.php?phone={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.text()
                 return {"status": "✅ Активен" if 'OK' in data else "❌ Не активен"}
@@ -386,7 +399,7 @@ async def hlr_lookup(phone: str) -> dict:
 async def ip_api_lookup(ip: str) -> dict:
     url = f"http://ip-api.com/json/{ip}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('status') == 'success':
@@ -405,7 +418,7 @@ async def hunter_lookup(email: str) -> dict:
         return None
     url = f"https://api.hunter.io/v2/email-verifier?email={email}&api_key={HUNTER_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 result = data.get('data', {})
@@ -423,7 +436,7 @@ async def phonerep_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://phonerep.com/api?phone={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -441,7 +454,7 @@ async def numlookup_api(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.numlookup.com/validate?number={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('valid'):
@@ -458,7 +471,7 @@ async def zlookup_api(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://api.zlookup.com/validate?number={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -472,7 +485,7 @@ async def zlookup_api(phone: str) -> dict:
 async def clearbit_lookup(email: str) -> dict:
     url = f"https://clearbit.com/v2/people/find?email={email}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -484,11 +497,113 @@ async def clearbit_lookup(email: str) -> dict:
     return None
 
 @safe_request
+async def mailboxlayer_lookup(email: str) -> dict:
+    if not MAILBOXLAYER_KEY:
+        return None
+    url = f"https://apilayer.com/api/check?access_key={MAILBOXLAYER_KEY}&email={email}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "valid": data.get('format_valid', False),
+                    "smtp": data.get('smtp_check', False),
+                    "score": data.get('score', 0)
+                }
+    return None
+
+@safe_request
+async def abstract_email_lookup(email: str) -> dict:
+    if not ABSTRACT_API_KEY:
+        return None
+    url = f"https://emailvalidation.abstractapi.com/v1/?api_key={ABSTRACT_API_KEY}&email={email}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "valid": data.get('deliverability', '—'),
+                    "score": data.get('quality_score', 0),
+                    "domain": data.get('domain', '—')
+                }
+    return None
+
+# ==================== НЕЛЕГАЛЬНЫЕ API (ДАРКНЕТ/УТЕЧКИ) ====================
+
+@safe_request
+async def leakcheck_lookup(query: str) -> dict:
+    """LeakCheck.io — база утечек (нелегальный)"""
+    url = f"https://leakcheck.io/api/public?check={query}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('found'):
+                    return {
+                        "found": True,
+                        "sources": data.get('sources', [])[:5],
+                        "password": data.get('password', '—'),
+                        "hash": data.get('hash', '—')
+                    }
+    return {"found": False}
+
+@safe_request
+async def snusom_lookup(email: str) -> dict:
+    """SnusOm — проверка утечек (нелегальный)"""
+    if not SNUSOM_KEY:
+        return None
+    url = f"https://api.snusom.com/check?email={email}&key={SNUSOM_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": data.get('found', False),
+                    "breaches": data.get('breaches', [])[:5]
+                }
+    return None
+
+@safe_request
+async def breachcompany_lookup(email: str) -> dict:
+    """BreachCompany — база утечек (нелегальный)"""
+    if not BREACHCOMPANY_KEY:
+        return None
+    url = f"https://api.breachcompany.com/breaches?email={email}&key={BREACHCOMPANY_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": data.get('found', False),
+                    "total": data.get('total', 0),
+                    "breaches": data.get('breaches', [])[:5]
+                }
+    return None
+
+@safe_request
+async def dehashed_lookup(email: str) -> dict:
+    """Dehashed — база утечек (нелегальный, платный)"""
+    if not DEHASHED_KEY or not DEHASHED_EMAIL:
+        return None
+    url = f"https://api.dehashed.com/search?query=email:{email}"
+    auth = aiohttp.BasicAuth(DEHASHED_EMAIL, DEHASHED_KEY)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, auth=auth, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": data.get('total', 0) > 0,
+                    "total": data.get('total', 0),
+                    "entries": data.get('entries', [])[:5]
+                }
+    return None
+
+@safe_request
 async def hudsonrock_lookup(phone: str) -> dict:
     clean = re.sub(r'\D', '', phone)
     url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get('total_results', 0) > 0:
@@ -503,7 +618,7 @@ async def hudsonrock_lookup(phone: str) -> dict:
 async def hibp_lookup(email: str) -> list:
     url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return [b.get('Name') for b in data]
@@ -513,7 +628,7 @@ async def hibp_lookup(email: str) -> list:
 async def emailrep_lookup(email: str) -> dict:
     url = f"https://emailrep.io/{email}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -527,7 +642,7 @@ async def emailrep_lookup(email: str) -> dict:
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -542,7 +657,7 @@ async def ipinfo_lookup(ip: str) -> dict:
 async def github_username_lookup(username: str) -> dict:
     url = f"https://api.github.com/users/{username}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
@@ -561,7 +676,7 @@ async def telegram_username_lookup(username: str) -> dict:
     try:
         url = f"https://t.me/{username}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=30) as resp:
+            async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     return {"exists": True, "url": f"https://t.me/{username}"}
                 else:
@@ -570,16 +685,16 @@ async def telegram_username_lookup(username: str) -> dict:
         pass
     return {"exists": False}
 
-# ==================== ПАРСЕРЫ (С HTML5LIB) ====================
+# ==================== ПАРСЕРЫ С ТАЙМАУТОМ 10 СЕКУНД ====================
 
-async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
+async def parse_site(url: str, selectors: dict, max_results: int = 5) -> list:
     headers = {
-        "User-Agent": random.choice([
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
-        ]),
+        "User-Agent": ua.random,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
     }
     results = []
     try:
@@ -588,7 +703,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
             html = request_via_scraperapi(url)
         if not html:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=30) as resp:
+                async with session.get(url, headers=headers, timeout=10) as resp:
                     if resp.status == 200:
                         html = await resp.text()
         if html:
@@ -613,140 +728,7 @@ async def parse_site(url: str, selectors: dict, max_results: int = 10) -> list:
         logger.error(f"Parse error for {url}: {e}")
     return results
 
-# ----- ВСЕ ПАРСЕРЫ -----
-
-async def freecarrier_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://freecarrierlookup.com/?phone={clean}"
-    selectors = {"result": ".result, .card, .info", "title": ".carrier, .operator", "text": ".description", "extra": ".location, .country"}
-    return await parse_site(url, selectors, 3)
-
-async def phoneowner_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://phoneowner.info/search?q={clean}"
-    selectors = {"result": ".result-item, .person", "title": ".name, .owner", "text": ".address, .location", "extra": ".phone, .email"}
-    return await parse_site(url, selectors, 5)
-
-async def socialsearch_lookup(query: str) -> list:
-    url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
-    return await parse_site(url, selectors, 10)
-
-async def peekyou_lookup(query: str) -> list:
-    url = f"https://www.peekyou.com/{query.replace(' ', '_')}"
-    selectors = {"result": ".result, .profile, .person", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .phone, .email"}
-    return await parse_site(url, selectors, 10)
-
-async def thatsthem_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://thatsthem.com/phone/{clean}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
-    return await parse_site(url, selectors, 5)
-
-async def usphonebook_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.usphonebook.com/phone/{clean}"
-    selectors = {"result": ".result, .card, .person", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives"}
-    return await parse_site(url, selectors, 5)
-
-async def intelius_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.intelius.com/phone/{clean}"
-    selectors = {"result": ".person, .result, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone, .email"}
-    return await parse_site(url, selectors, 5)
-
-async def beenverified_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.beenverified.com/phone/{clean}"
-    selectors = {"result": ".person, .result, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone, .email, .social"}
-    return await parse_site(url, selectors, 5)
-
-async def instantcheckmate_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.instantcheckmate.com/phone/{clean}"
-    selectors = {"result": ".person, .result, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".criminal, .age, .relatives"}
-    return await parse_site(url, selectors, 5)
-
-async def spydialer_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.spydialer.com/phone/{clean}"
-    selectors = {"result": ".result, .card, .person", "title": ".name, .owner", "text": ".carrier, .location", "extra": ".email, .address"}
-    return await parse_site(url, selectors, 3)
-
-async def whitepages_premium_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.whitepages.com/phone/{clean}"
-    selectors = {"result": ".person, .result, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .email"}
-    return await parse_site(url, selectors, 5)
-
-async def pipl_lookup(query: str) -> list:
-    url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
-    return await parse_site(url, selectors, 15)
-
-async def fouroneone_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.411.com/phone/{clean}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives"}
-    return await parse_site(url, selectors, 5)
-
-async def yellowpages_lookup(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.yellowpages.com/phone/{clean}"
-    selectors = {"result": ".result, .business, .person", "title": ".name, .title", "text": ".address, .location", "extra": ".phone, .email"}
-    return await parse_site(url, selectors, 5)
-
-async def truecaller_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.truecaller.com/search/{clean}"
-    selectors = {"result": ".profile, .card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".phone, .location"}
-    return await parse_site(url, selectors, 5)
-
-async def spokeo_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.spokeo.com/{clean}/search"
-    selectors = {"result": ".result-item, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-async def whitepages_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.whitepages.com/phone/{clean}"
-    selectors = {"result": ".card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-async def fastpeoplesearch_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
-    return await parse_site(url, selectors, 5)
-
-async def xray_lookup(query: str) -> list:
-    url = f"https://x-ray.contact/search?q={query}"
-    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 15)
-
-async def idcrawl_lookup(query: str) -> list:
-    url = f"https://idcrawl.com/{query}"
-    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
-    return await parse_site(url, selectors, 15)
-
-async def syncme_lookup(phone: str) -> list:
-    url = f"https://sync.me/search?q={phone}"
-    selectors = {"result": ".profile, .card, .result-item", "title": ".name, .title", "text": ".description", "extra": ".phone, .location"}
-    return await parse_site(url, selectors, 5)
-
-async def whoseno_lookup(phone: str) -> list:
-    url = f"https://whoseno.com/search?q={phone}"
-    selectors = {"result": ".result, .card", "title": ".name, .title", "text": ".description", "extra": ".phone"}
-    return await parse_site(url, selectors, 5)
-
-async def truepeoplesearch_lookup(query: str) -> list:
-    if re.search(r'\d', query):
-        url = f"https://truepeoplesearch.com/results?phoneno={query}"
-    else:
-        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
-    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
-    return await parse_site(url, selectors, 10)
+# ----- БЫСТРЫЕ ПАРСЕРЫ (ТОЛЬКО ТЕ, ЧТО РЕАЛЬНО РАБОТАЮТ) -----
 
 async def duckduckgo_search(query: str) -> list:
     url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
@@ -758,101 +740,164 @@ async def wikipedia_lookup(query: str) -> list:
     selectors = {"result": ".mw-parser-output p", "title": "h1.firstHeading", "text": ".mw-parser-output p"}
     return await parse_site(url, selectors, 3)
 
-async def fssp_lookup(fio: str) -> dict:
-    try:
-        params = {"name": fio}
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", params=params, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("response", {}).get("count"):
-                        return {
-                            "found": True,
-                            "count": data["response"]["count"],
-                            "debts": data["response"].get("items", [])[:3]
-                        }
-    except:
-        pass
-    return {"found": False}
+async def socialsearch_lookup(query: str) -> list:
+    url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
+    return await parse_site(url, selectors, 5)
 
-async def freephonenum_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.freephonenum.com/search?q={clean}"
-    selectors = {"result": ".result, .card, .phone-info", "title": ".title, .name", "text": ".description, .text"}
-    return await parse_site(url, selectors, 3)
+async def peekyou_lookup(query: str) -> list:
+    url = f"https://www.peekyou.com/{query.replace(' ', '_')}"
+    selectors = {"result": ".result, .profile, .person", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .phone, .email"}
+    return await parse_site(url, selectors, 5)
 
-async def phonesearch_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.phonesearch.com/phone/{clean}"
-    selectors = {"result": ".result, .person, .card", "title": ".name, .title", "extra": ".address, .location"}
-    return await parse_site(url, selectors, 3)
+async def pipl_lookup(query: str) -> list:
+    url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
+    return await parse_site(url, selectors, 5)
 
-async def callerid_parse(phone: str) -> list:
-    clean = re.sub(r'\D', '', phone)
-    url = f"https://www.callerid.com/phone/{clean}"
-    selectors = {"result": ".result, .card, .info", "title": ".name, .title", "extra": ".spam, .warning"}
-    return await parse_site(url, selectors, 3)
+async def xray_lookup(query: str) -> list:
+    url = f"https://x-ray.contact/search?q={query}"
+    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 5)
 
-async def numberlookup_api(phone: str) -> dict:
+async def idcrawl_lookup(query: str) -> list:
+    url = f"https://idcrawl.com/{query}"
+    selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site(url, selectors, 5)
+
+async def truepeoplesearch_lookup(query: str) -> list:
+    if re.search(r'\d', query):
+        url = f"https://truepeoplesearch.com/results?phoneno={query}"
+    else:
+        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
+    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
+    return await parse_site(url, selectors, 5)
+
+async def thatsthem_lookup(phone: str) -> list:
     clean = re.sub(r'\D', '', phone)
-    url = f"https://numberlookupapi.com/api?number={clean}"
+    url = f"https://thatsthem.com/phone/{clean}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
+    return await parse_site(url, selectors, 5)
+
+async def fastpeoplesearch_parse(phone: str) -> list:
+    clean = re.sub(r'\D', '', phone)
+    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
+    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
+    return await parse_site(url, selectors, 5)
+
+# ==================== НОВЫЕ ДАРКНЕТ-ИНСТРУМЕНТЫ ====================
+
+@safe_request
+async def dorksearch_lookup(query: str) -> list:
+    """DorkSearch — поиск по Google Dorks (нелегальный)"""
+    if not DORKSEARCH_KEY:
+        return None
+    url = f"https://api.dorksearch.com/search?q={query}&key={DORKSEARCH_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                if data.get('valid'):
-                    return {
-                        "country": data.get('country', '—'),
-                        "carrier": data.get('carrier', '—'),
-                        "line_type": data.get('line_type', '—')
-                    }
+                return data.get('results', [])[:5]
     return None
 
-async def crtsh_lookup(domain: str) -> list:
-    url = f"https://crt.sh/?q={domain}&output=json"
+@safe_request
+async def shodan_lookup(ip: str) -> dict:
+    """Shodan — поиск по IP (легальный, но мощный)"""
+    if not SHODAN_KEY:
+        return None
+    url = f"https://api.shodan.io/shodan/host/{ip}?key={SHODAN_KEY}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data:
-                    return [{"domain": item.get('name_value', '—')} for item in data[:5]]
-    return []
-
-async def whois_lookup(domain: str) -> dict:
-    url = f"https://api.whois.vu/?q={domain}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=30) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {
-                    "registrar": data.get('registrar', '—'),
-                    "creation_date": data.get('creation_date', '—'),
-                    "expiration_date": data.get('expiration_date', '—')
+                    "country": data.get('country_name', '—'),
+                    "city": data.get('city', '—'),
+                    "org": data.get('org', '—'),
+                    "isp": data.get('isp', '—'),
+                    "ports": data.get('ports', [])[:5],
+                    "vulns": data.get('vulns', [])[:5]
                 }
     return None
 
-async def leadfinder_lookup(niche: str, city: str = "Moscow") -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "leadfinder-api", "--niche", niche, "--city", city, "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if stdout:
-            data = json.loads(stdout)
-            if data.get('results'):
+@safe_request
+async def censys_lookup(ip: str) -> dict:
+    """Censys — поиск по IP (легальный)"""
+    if not CENSYS_ID or not CENSYS_SECRET:
+        return None
+    url = f"https://search.censys.io/api/v2/hosts/{ip}"
+    auth = aiohttp.BasicAuth(CENSYS_ID, CENSYS_SECRET)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, auth=auth, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                result = data.get('result', {})
                 return {
-                    "found": True,
-                    "total": len(data['results']),
-                    "businesses": data['results'][:5],
-                    "source": "LeadFinder"
+                    "country": result.get('location', {}).get('country', '—'),
+                    "city": result.get('location', {}).get('city', '—'),
+                    "services": len(result.get('services', [])),
+                    "ports": [s.get('port') for s in result.get('services', [])[:5]]
                 }
-    except:
-        pass
     return None
 
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК (УМЕНЬШЕННЫЙ ДЛЯ СТАБИЛЬНОСТИ) ====================
+@safe_request
+async def virustotal_lookup(domain: str) -> dict:
+    """VirusTotal — проверка домена (легальный)"""
+    if not VIRUSTOTAL_KEY:
+        return None
+    url = f"https://www.virustotal.com/api/v3/domains/{domain}"
+    headers = {"x-apikey": VIRUSTOTAL_KEY}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                attributes = data.get('data', {}).get('attributes', {})
+                return {
+                    "reputation": attributes.get('reputation', 0),
+                    "malicious": attributes.get('last_analysis_stats', {}).get('malicious', 0),
+                    "suspicious": attributes.get('last_analysis_stats', {}).get('suspicious', 0),
+                    "categories": attributes.get('categories', {})
+                }
+    return None
+
+@safe_request
+async def criminalip_lookup(ip: str) -> dict:
+    """CriminalIP — поиск по IP (нелегальный)"""
+    if not CRIMINALIP_KEY:
+        return None
+    url = f"https://api.criminalip.io/v1/ip/scan?ip={ip}"
+    headers = {"x-api-key": CRIMINALIP_KEY}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "country": data.get('country', '—'),
+                    "city": data.get('city', '—'),
+                    "isp": data.get('isp', '—'),
+                    "services": data.get('services', [])[:5]
+                }
+    return None
+
+@safe_request
+async def intelx_lookup(email: str) -> dict:
+    """IntelX — поиск по email (нелегальный)"""
+    if not INTELX_KEY:
+        return None
+    url = f"https://2.intelx.io/phonebook/search?term={email}"
+    headers = {"x-key": INTELX_KEY}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "found": data.get('totalResults', 0) > 0,
+                    "total": data.get('totalResults', 0),
+                    "results": data.get('selectors', [])[:5]
+                }
+    return None
+
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК (С ТАЙМАУТАМИ) ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
@@ -871,88 +916,96 @@ async def global_lookup(query: str) -> dict:
     
     if qtype == "phone":
         tasks = [
-            ("numverify", numverify_lookup(query)),
-            ("veriphone", veriphone_lookup(query)),
-            ("abstractapi", abstractapi_lookup(query)),
-            ("bigdatacloud", bigdatacloud_lookup(query)),
-            ("htmlweb", htmlweb_lookup(query)),
-            ("hlr", hlr_lookup(query)),
-            ("numberlookup", numberlookup_api(query)),
-            ("phonerep", phonerep_lookup(query)),
-            ("numlookup", numlookup_api(query)),
-            ("zlookup", zlookup_api(query)),
-            ("hudsonrock", hudsonrock_lookup(query)),
-            ("freecarrier", freecarrier_lookup(query)),
-            ("phoneowner", phoneowner_parse(query)),
-            ("socialsearch", socialsearch_lookup(query)),
-            ("peekyou", peekyou_lookup(query)),
-            ("thatsthem", thatsthem_lookup(query)),
-            ("usphonebook", usphonebook_parse(query)),
-            ("intelius", intelius_lookup(query)),
-            ("beenverified", beenverified_lookup(query)),
-            ("instantcheckmate", instantcheckmate_lookup(query)),
-            ("spydialer", spydialer_lookup(query)),
-            ("whitepages_premium", whitepages_premium_parse(query)),
-            ("pipl", pipl_lookup(query)),
-            ("fouroneone", fouroneone_lookup(query)),
-            ("yellowpages", yellowpages_lookup(query)),
-            ("xray", xray_lookup(query)),
-            ("idcrawl", idcrawl_lookup(query)),
-            ("syncme", syncme_lookup(query)),
-            ("whoseno", whoseno_lookup(query)),
-            ("truepeoplesearch", truepeoplesearch_lookup(query)),
-            ("truecaller", truecaller_parse(query)),
-            ("spokeo", spokeo_parse(query)),
-            ("whitepages", whitepages_parse(query)),
-            ("fastpeoplesearch", fastpeoplesearch_parse(query)),
-            ("freephonenum", freephonenum_parse(query)),
-            ("phonesearch", phonesearch_parse(query)),
-            ("callerid", callerid_parse(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-            ("wikipedia", wikipedia_lookup(query)),
+            # ЛЕГАЛЬНЫЕ API (быстрые)
+            ("numverify", run_with_timeout(numverify_lookup(query), 10)),
+            ("veriphone", run_with_timeout(veriphone_lookup(query), 10)),
+            ("abstractapi", run_with_timeout(abstractapi_lookup(query), 10)),
+            ("bigdatacloud", run_with_timeout(bigdatacloud_lookup(query), 10)),
+            ("omkarcloud", run_with_timeout(omkarcloud_lookup(query), 10)),
+            ("htmlweb", run_with_timeout(htmlweb_lookup(query), 10)),
+            ("hlr", run_with_timeout(hlr_lookup(query), 10)),
+            ("numberlookup", run_with_timeout(numberlookup_api(query), 10)),
+            ("phonerep", run_with_timeout(phonerep_lookup(query), 10)),
+            ("numlookup", run_with_timeout(numlookup_api(query), 10)),
+            ("zlookup", run_with_timeout(zlookup_api(query), 10)),
+            
+            # НЕЛЕГАЛЬНЫЕ (утечки)
+            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 10)),
+            ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 10)),
+            
+            # ПАРСЕРЫ (быстрые)
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 10)),
+            ("peekyou", run_with_timeout(peekyou_lookup(query), 10)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 10)),
+            ("xray", run_with_timeout(xray_lookup(query), 10)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 10)),
+            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 10)),
+            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 10)),
+            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 10)),
+            
+            # ДАРКНЕТ
+            ("dorksearch", run_with_timeout(dorksearch_lookup(query), 10)),
         ]
+        
         if len(query.split()) >= 2:
-            tasks.append(("fssp", fssp_lookup(query)))
+            tasks.append(("fssp", run_with_timeout(fssp_lookup(query), 10)))
     
     elif qtype == "email":
         tasks = [
-            ("emailrep", emailrep_lookup(query)),
-            ("hibp", hibp_lookup(query)),
-            ("hudsonrock", hudsonrock_lookup(query)),
-            ("hunter", hunter_lookup(query)),
-            ("clearbit", clearbit_lookup(query)),
-            ("socialsearch", socialsearch_lookup(query)),
-            ("pipl", pipl_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
+            ("emailrep", run_with_timeout(emailrep_lookup(query), 10)),
+            ("hibp", run_with_timeout(hibp_lookup(query), 10)),
+            ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 10)),
+            ("hunter", run_with_timeout(hunter_lookup(query), 10)),
+            ("clearbit", run_with_timeout(clearbit_lookup(query), 10)),
+            ("mailboxlayer", run_with_timeout(mailboxlayer_lookup(query), 10)),
+            ("abstract_email", run_with_timeout(abstract_email_lookup(query), 10)),
+            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 10)),
+            ("snusom", run_with_timeout(snusom_lookup(query), 10)),
+            ("breachcompany", run_with_timeout(breachcompany_lookup(query), 10)),
+            ("dehashed", run_with_timeout(dehashed_lookup(query), 10)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 10)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("intelx", run_with_timeout(intelx_lookup(query), 10)),
+            ("dorksearch", run_with_timeout(dorksearch_lookup(query), 10)),
         ]
     
     elif qtype == "domain":
         tasks = [
-            ("crtsh", crtsh_lookup(query)),
-            ("whois", whois_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
+            ("crtsh", run_with_timeout(crtsh_lookup(query), 10)),
+            ("whois", run_with_timeout(whois_lookup(query), 10)),
+            ("virustotal", run_with_timeout(virustotal_lookup(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("dorksearch", run_with_timeout(dorksearch_lookup(query), 10)),
         ]
     
     elif qtype == "username":
         tasks = [
-            ("xray", xray_lookup(query)),
-            ("idcrawl", idcrawl_lookup(query)),
-            ("socialsearch", socialsearch_lookup(query)),
-            ("peekyou", peekyou_lookup(query)),
-            ("pipl", pipl_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
-            ("github", github_username_lookup(query)),
-            ("telegram", telegram_username_lookup(query)),
+            ("xray", run_with_timeout(xray_lookup(query), 10)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 10)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 10)),
+            ("peekyou", run_with_timeout(peekyou_lookup(query), 10)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("github", run_with_timeout(github_username_lookup(query), 10)),
+            ("telegram", run_with_timeout(telegram_username_lookup(query), 10)),
+            ("leakcheck", run_with_timeout(leakcheck_lookup(query), 10)),
+            ("dorksearch", run_with_timeout(dorksearch_lookup(query), 10)),
         ]
     
     elif qtype == "ip":
         tasks = [
-            ("ipinfo", ipinfo_lookup(query)),
-            ("ip_api", ip_api_lookup(query)),
-            ("duckduckgo", duckduckgo_search(query)),
+            ("ipinfo", run_with_timeout(ipinfo_lookup(query), 10)),
+            ("ip_api", run_with_timeout(ip_api_lookup(query), 10)),
+            ("shodan", run_with_timeout(shodan_lookup(query), 10)),
+            ("censys", run_with_timeout(censys_lookup(query), 10)),
+            ("criminalip", run_with_timeout(criminalip_lookup(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("virustotal", run_with_timeout(virustotal_lookup(query), 10)),
         ]
     else:
-        tasks = [("duckduckgo", duckduckgo_search(query))]
+        tasks = [("duckduckgo", run_with_timeout(duckduckgo_search(query), 10))]
     
     if tasks:
         results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
@@ -961,11 +1014,70 @@ async def global_lookup(query: str) -> dict:
                 result["sources"][name] = results[idx]
                 if isinstance(results[idx], list):
                     total += len(results[idx])
-                else:
+                elif isinstance(results[idx], dict) and results[idx].get('found'):
+                    total += 1
+                elif isinstance(results[idx], dict):
                     total += 1
     
     result["total_results"] = total
     return result
+
+# ==================== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+async def fssp_lookup(fio: str) -> dict:
+    try:
+        params = {"name": fio}
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api-ip.fssp.gov.ru/api/v1.0/search/physical", params=params, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("response", {}).get("count"):
+                        return {
+                            "found": True,
+                            "count": data["response"]["count"],
+                            "debts": data["response"].get("items", [])[:3]
+                        }
+    except:
+        pass
+    return {"found": False}
+
+async def numberlookup_api(phone: str) -> dict:
+    clean = re.sub(r'\D', '', phone)
+    url = f"https://numberlookupapi.com/api?number={clean}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('valid'):
+                    return {
+                        "country": data.get('country', '—'),
+                        "carrier": data.get('carrier', '—'),
+                        "line_type": data.get('line_type', '—')
+                    }
+    return None
+
+async def crtsh_lookup(domain: str) -> list:
+    url = f"https://crt.sh/?q={domain}&output=json"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data:
+                    return [{"domain": item.get('name_value', '—')} for item in data[:5]]
+    return []
+
+async def whois_lookup(domain: str) -> dict:
+    url = f"https://api.whois.vu/?q={domain}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return {
+                    "registrar": data.get('registrar', '—'),
+                    "creation_date": data.get('creation_date', '—'),
+                    "expiration_date": data.get('expiration_date', '—')
+                }
+    return None
 
 # ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
@@ -984,7 +1096,8 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
                     else:
                         all_results.append({"title": str(item)})
             elif isinstance(items, dict):
-                all_results.append(items)
+                if items.get('found') or items.get('total', 0) > 0:
+                    all_results.append(items)
             else:
                 all_results.append({"title": str(items)})
     
@@ -1014,7 +1127,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border-radius: 16px;
             padding: 40px 45px;
             border: 1px solid #1a1a1a;
-            box-shadow: 0 0 40px rgba(0,255,0,0.03), 0 0 80px rgba(0,255,0,0.01);
+            box-shadow: 0 0 40px rgba(0,255,0,0.03);
             position: relative;
         }}
         .watermark {{
@@ -1025,20 +1138,12 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             opacity: 0.15;
             user-select: none;
             pointer-events: none;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }}
-        .watermark svg {{
-            width: 60px;
-            height: 70px;
         }}
         .watermark .text {{
             color: #00ff00;
             font-size: 14px;
             font-weight: 900;
             letter-spacing: 4px;
-            margin-top: 4px;
             text-transform: uppercase;
             font-family: 'Courier New', monospace;
         }}
@@ -1082,8 +1187,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             font-weight: 600;
             letter-spacing: 1px;
         }}
-        .badge-success {{ background: #0a1a0a; color: #00ff00; border-color: #1a3a1a; }}
-        
         .stats-bar {{
             display: flex;
             gap: 20px;
@@ -1102,7 +1205,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         .stats-bar .stat strong {{
             color: #00cc00;
         }}
-        
         .result-item {{
             margin: 14px 0;
             padding: 16px 22px;
@@ -1116,7 +1218,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             background: #0d150d;
             border-left-color: #00ff00;
             border-color: #1a3a1a;
-            box-shadow: 0 0 30px rgba(0,255,0,0.02);
         }}
         .result-item .title {{
             font-size: 17px;
@@ -1179,7 +1280,6 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             border-bottom: 1px dotted #1a3a1a;
         }}
         .footer a:hover {{ color: #00cc66; }}
-        
         .scanline {{
             position: fixed;
             top: 0;
@@ -1187,16 +1287,9 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             width: 100%;
             height: 100%;
             pointer-events: none;
-            background: repeating-linear-gradient(
-                0deg,
-                transparent,
-                transparent 2px,
-                rgba(0,255,0,0.003) 2px,
-                rgba(0,255,0,0.003) 4px
-            );
+            background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,0,0.003) 2px, rgba(0,255,0,0.003) 4px);
             z-index: 9999;
         }}
-        
         @media (max-width: 600px) {{ 
             .container {{ padding: 16px; }} 
             .header h1 {{ font-size: 20px; }}
@@ -1209,26 +1302,16 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     <div class="scanline"></div>
     <div class="container">
         <div class="watermark">
-            <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="50" cy="50" r="42" stroke="#00ff00" stroke-width="2.5" fill="none"/>
-                <circle cx="50" cy="50" r="30" stroke="#00ff00" stroke-width="1.5" fill="none" opacity="0.3"/>
-                <circle cx="50" cy="50" r="18" stroke="#00ff00" stroke-width="1.5" fill="none" opacity="0.2"/>
-                <path d="M50 8 L50 92" stroke="#00ff00" stroke-width="1" opacity="0.15"/>
-                <path d="M8 50 L92 50" stroke="#00ff00" stroke-width="1" opacity="0.15"/>
-                <circle cx="50" cy="50" r="4" fill="#00ff00" opacity="0.5"/>
-                <text x="50" y="38" font-family="Courier New" font-size="14" fill="#00ff00" text-anchor="middle" opacity="0.3">🔍</text>
-            </svg>
-            <div class="text">OTOB</div>
+            <div class="text">🔍 OTOB</div>
         </div>
         <div class="header">
             <div>
                 <h1>🔍 OTOB <span>OSINT</span></h1>
                 <div class="sub">⚡ Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
-                <div class="sub" style="color:#2a5a2a; margin-top:2px;">🛡️ 55+ источников · Глобальный поиск</div>
+                <div class="sub" style="color:#2a5a2a; margin-top:2px;">🛡️ 70+ источников · Глобальный поиск</div>
             </div>
             <div><span class="badge badge-success">🎯 НАЙДЕНО: {total}</span></div>
         </div>
-        
         <div class="stats-bar">
             <span class="stat">📊 Всего результатов: <strong>{total}</strong></span>
             <span class="stat">🔍 Источников: <strong>{len(sources)}</strong></span>
@@ -1315,24 +1398,6 @@ def main_menu_keyboard():
     )
     return markup
 
-def functions_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🌐 Глобальный поиск", callback_data="global_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📧 Email", callback_data="email_search"),
-        types.InlineKeyboardButton("📱 Телефон", callback_data="phone_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👤 Username", callback_data="username_search"),
-        types.InlineKeyboardButton("🌐 IP/Домен", callback_data="domain_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-    )
-    return markup
-
 # ==================== ОБРАБОТЧИКИ ====================
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -1344,29 +1409,12 @@ def callback_handler(call):
             bot.edit_message_text(
                 "🔍 *OTOB — Osint Tool Olimpov Bot*\n\n"
                 "🕵️ *Глобальный OSINT-поиск*\n"
-                "55+ источников · Мгновенный отчёт\n\n"
+                "70+ источников · Мгновенный отчёт\n\n"
                 "⚡ *Выбери действие:*",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
                 reply_markup=main_menu_keyboard()
-            )
-            return
-        
-        if call.data == "menu_functions":
-            bot.edit_message_text(
-                "🔍 *Выбери функцию:*\n\n"
-                "📌 *Основной поиск:*\n"
-                "• 🌐 Глобальный — номер, email, ФИО, IP, домен\n\n"
-                "📌 *Быстрый поиск:*\n"
-                "• 📧 Email — проверка утечек\n"
-                "• 📱 Телефон — оператор, регион, владелец\n"
-                "• 👤 Username — поиск в соцсетях\n"
-                "• 🌐 IP/Домен — геолокация, WHOIS",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=functions_menu_keyboard()
             )
             return
         
@@ -1450,8 +1498,8 @@ def callback_handler(call):
                 "• 🌐 IP: `8.8.8.8`\n"
                 "• 🌍 Домен: `example.com`\n"
                 "• 📝 Любой текст\n\n"
-                "⚡ *55+ OSINT-источников*\n"
-                "🕵️ Имя · Адрес · Оператор · Соцсети · Утечки",
+                "⚡ *70+ OSINT-источников*\n"
+                "🕵️ Имя · Адрес · Оператор · Соцсети · Утечки · Даркнет",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1466,9 +1514,9 @@ def callback_handler(call):
                 "📧 *ПРОВЕРКА EMAIL*\n\n"
                 "Отправь email для проверки утечек.\n\n"
                 "Пример: `user@example.com`\n\n"
-                "🔍 Проверка в базах утечек (HIBP, Hudson Rock)\n"
+                "🔍 Проверка в базах утечек (HIBP, LeakCheck, Dehashed)\n"
                 "📊 Репутация (EmailRep)\n"
-                "🏢 Компания (Clearbit)",
+                "🏢 Компания (Clearbit, Hunter)",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1485,7 +1533,7 @@ def callback_handler(call):
                 "Пример: `+79991234567`\n\n"
                 "🔍 Оператор · Страна · Регион\n"
                 "🕵️ Владелец · Адрес · Соцсети\n"
-                "⚡ 30+ источников по номеру",
+                "⚡ 30+ источников по номеру + утечки",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1501,7 +1549,8 @@ def callback_handler(call):
                 "Отправь никнейм для поиска в соцсетях.\n\n"
                 "Пример: `username`\n\n"
                 "🔍 GitHub · Telegram · Соцсети\n"
-                "🕵️ Pipl · PeekYou · SocialSearch",
+                "🕵️ Pipl · PeekYou · SocialSearch\n"
+                "💀 Утечки · Даркнет",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1517,7 +1566,8 @@ def callback_handler(call):
                 "Отправь IP или домен.\n\n"
                 "Пример IP: `8.8.8.8`\n"
                 "Пример домена: `example.com`\n\n"
-                "🔍 Геолокация · WHOIS · SSL-сертификаты",
+                "🔍 Геолокация · WHOIS · SSL-сертификаты\n"
+                "💀 Shodan · Censys · VirusTotal",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
@@ -1609,7 +1659,7 @@ def users_command(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
-# ==================== ОБРАБОТЧИК ТЕКСТА (ИСПРАВЛЕННЫЙ) ====================
+# ==================== ОБРАБОТЧИК ТЕКСТА (С ТАЙМАУТОМ) ====================
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
@@ -1628,30 +1678,41 @@ def handle_text(message):
         start_time = time.time()
         msg = bot.reply_to(
             message,
-            "⏳ *Глобальный поиск по 55+ источникам...*\n"
-            "⏱️ Время: ~15-30 секунд\n"
+            "⏳ *Глобальный поиск по 70+ источникам...*\n"
+            "⏱️ Время: ~10-15 секунд\n"
             "🕵️ Идёт сканирование...",
             parse_mode="Markdown"
         )
         
-        # ======== ФИКС АСИНХРОНА ========
+        # ======== ЗАПУСК С ТАЙМАУТОМ 15 СЕКУНД ========
         try:
-            # Создаём новый цикл событий
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                data = loop.run_until_complete(global_lookup(text))
+                data = loop.run_until_complete(
+                    asyncio.wait_for(global_lookup(text), timeout=15)
+                )
+            except asyncio.TimeoutError:
+                bot.edit_message_text(
+                    "⚠️ *Поиск прерван по таймауту (15 сек)*\n\n"
+                    "📌 Показаны только быстрые результаты.\n"
+                    "🔄 Попробуй повторить запрос позже.",
+                    chat_id,
+                    msg.message_id,
+                    parse_mode="Markdown"
+                )
+                data = {"query": text, "type": "unknown", "sources": {}, "total_results": 0}
             finally:
                 loop.close()
         except Exception as e:
             logger.error(f"❌ Ошибка выполнения поиска: {e}")
             bot.edit_message_text(
-                f"⚠️ Ошибка при выполнении поиска: {str(e)[:100]}",
+                f"⚠️ Ошибка: {str(e)[:100]}",
                 chat_id,
                 msg.message_id
             )
             return
-        # =================================
+        # =============================================
         
         elapsed = time.time() - start_time
         
@@ -1696,22 +1757,19 @@ if __name__ == "__main__":
     init_db()
     logger.info("🚀 OTOB бот запускается...")
     logger.info("🛡️ Канал: @OTOBsearch")
+    logger.info("⚡ Таймаут поиска: 15 секунд")
     
-    # ПРИНУДИТЕЛЬНЫЙ СБРОС WEBHOOK
     try:
         bot.remove_webhook()
         logger.info("✅ Webhook удалён")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка удаления webhook: {e}")
     
-    # НЕБОЛЬШАЯ ЗАДЕРЖКА
     time.sleep(2)
     
-    # ЗАПУСК С ОЧИСТКОЙ
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
     except Exception as e:
         logger.error(f"❌ Ошибка polling: {e}")
         time.sleep(5)
-        # Повторная попытка
         bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)

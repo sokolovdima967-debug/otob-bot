@@ -254,45 +254,6 @@ def clean_phone(phone: str) -> str:
     """Очищает номер телефона от лишних символов"""
     return re.sub(r'\D', '', phone)
 
-def _has_useful_data(item: dict) -> bool:
-    """Проверяет, есть ли в словаре полезные данные"""
-    if not item:
-        return False
-    
-    # Если есть found: True — точно показываем
-    if item.get('found') is True:
-        return True
-    
-    # Если есть exists: True — показываем
-    if item.get('exists') is True:
-        return True
-    
-    # Если есть total > 0 — показываем
-    if item.get('total', 0) > 0:
-        return True
-    
-    # Проверяем наличие полезных полей
-    useful_fields = ['name', 'names', 'carrier', 'operator', 'country', 'region', 
-                     'status', 'spam_risk', 'password', 'hash', 'sources', 'breaches',
-                     'country_code', 'timezone', 'valid', 'possible']
-    
-    for field in useful_fields:
-        value = item.get(field)
-        if value and value != '—' and value != '':
-            return True
-    
-    # Проверяем title и text
-    title = item.get('title', '')
-    text = item.get('text', '')
-    if title and title != '—' and title != '':
-        return True
-    if text and text != '—' and text != '':
-        return True
-    if item.get('extra') and item.get('extra') != '—':
-        return True
-    
-    return False
-
 # ==================== ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ====================
 def detect_query_type(query: str) -> str:
     query = query.strip()
@@ -310,7 +271,7 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== ВСЕ ФУНКЦИИ ПОИСКА (БЕЗ КЛЮЧЕЙ) ====================
+# ==================== ВСЕ ФУНКЦИИ ПОИСКА ====================
 
 # ----- 1. PHONENUMBERS -----
 async def phonenumbers_info(phone: str) -> dict:
@@ -933,7 +894,7 @@ async def global_lookup(query: str) -> dict:
     result["total_results"] = total
     return result
 
-# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА (ИСПРАВЛЕННАЯ) ====================
+# ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА (ПОКАЗЫВАЕТ ВСЁ) ====================
 
 def generate_html_report(query: str, data: dict, report_id: str) -> str:
     sources = data.get("sources", {})
@@ -944,16 +905,30 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     
     for source_name, items in sources.items():
         if not items:
+            all_results.append({
+                "title": f"⚠️ {source_name} — нет данных",
+                "_source": source_name,
+                "text": "",
+                "extra": "",
+                "empty": True
+            })
             continue
         
         if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict):
-                    if _has_useful_data(item):
+            if not items:
+                all_results.append({
+                    "title": f"⚠️ {source_name} — пустой список",
+                    "_source": source_name,
+                    "text": "",
+                    "extra": "",
+                    "empty": True
+                })
+            else:
+                for item in items:
+                    if isinstance(item, dict):
                         item['_source'] = source_name
                         all_results.append(item)
-                else:
-                    if str(item) and str(item) != '—' and str(item) != '':
+                    else:
                         all_results.append({
                             "title": str(item),
                             "_source": source_name,
@@ -961,30 +936,17 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
                             "extra": ""
                         })
         elif isinstance(items, dict):
-            if _has_useful_data(items):
-                item_copy = items.copy()
-                item_copy['_source'] = source_name
-                all_results.append(item_copy)
+            item_copy = items.copy()
+            item_copy['_source'] = source_name
+            all_results.append(item_copy)
         else:
-            if str(items) and str(items) != '—' and str(items) != '':
-                all_results.append({
-                    "title": str(items),
-                    "_source": source_name,
-                    "text": "",
-                    "extra": ""
-                })
+            all_results.append({
+                "title": str(items),
+                "_source": source_name,
+                "text": "",
+                "extra": ""
+            })
     
-    # Убираем дубликаты
-    seen_titles = set()
-    unique_results = []
-    for item in all_results:
-        title_key = str(item.get('title', ''))[:50] + str(item.get('_source', ''))
-        if title_key not in seen_titles:
-            seen_titles.add(title_key)
-            unique_results.append(item)
-    all_results = unique_results
-    
-    # Показываем ВСЕ результаты, которые нашли что-то (БЕЗ ОГРАНИЧЕНИЯ)
     display_results = all_results
     
     title = generate_otob_title(query, qtype)
@@ -1154,27 +1116,37 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }}
-        .empty {{ 
-            color: #3a5a3a; 
-            font-style: italic; 
-            font-size: 15px; 
-            padding: 30px; 
+        .empty-tag {{
+            display: inline-block;
+            background: #2a1a1a;
+            color: #8a4a4a;
+            font-size: 10px;
+            padding: 2px 10px;
+            border-radius: 4px;
+            margin-left: 10px;
+            border: 1px solid #3a1a1a;
+        }}
+        .empty {{
+            color: #3a5a3a;
+            font-style: italic;
+            font-size: 15px;
+            padding: 30px;
             text-align: center;
             border: 1px dashed #1a2a1a;
             border-radius: 8px;
         }}
-        .footer {{ 
-            margin-top: 30px; 
-            padding-top: 20px; 
-            border-top: 1px solid #1a2a1a; 
-            font-size: 12px; 
-            color: #2a4a2a; 
+        .footer {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #1a2a1a;
+            font-size: 12px;
+            color: #2a4a2a;
             text-align: center;
             font-family: 'Courier New', monospace;
         }}
-        .footer a {{ 
-            color: #3a6a3a; 
-            text-decoration: none; 
+        .footer a {{
+            color: #3a6a3a;
+            text-decoration: none;
             border-bottom: 1px dotted #1a3a1a;
         }}
         .footer a:hover {{ color: #00cc66; }}
@@ -1188,8 +1160,8 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,0,0.003) 2px, rgba(0,255,0,0.003) 4px);
             z-index: 9999;
         }}
-        @media (max-width: 600px) {{ 
-            .container {{ padding: 16px; }} 
+        @media (max-width: 600px) {{
+            .container {{ padding: 16px; }}
             .header h1 {{ font-size: 20px; }}
             .watermark {{ display: none; }}
             .stats-bar {{ flex-direction: column; gap: 6px; }}
@@ -1212,16 +1184,30 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         </div>
         <div class="stats-bar">
             <span class="stat">📊 Всего результатов: <strong>{total}</strong></span>
-            <span class="stat">🔍 Источников с данными: <strong>{len(display_results)}</strong></span>
+            <span class="stat">🔍 Всего источников: <strong>{len(sources)}</strong></span>
+            <span class="stat">📦 Показано: <strong>{len(display_results)}</strong></span>
             <span class="stat">⚡ Статус: <strong style="color:#00ff00;">АКТИВЕН</strong></span>
         </div>
 """
     
     if display_results:
-        # Показываем ВСЕ результаты (БЕЗ ОГРАНИЧЕНИЯ!)
         for idx, item in enumerate(display_results, 1):
             source = item.get('_source', '')
             title = item.get('title', '—')
+            
+            if item.get('empty'):
+                html += f"""
+        <div class="result-item" style="border-left-color: #3a1a1a; opacity: 0.6;">
+            <div class="title">
+                <span class="index">#{idx}</span>
+                {title}
+                <span class="empty-tag">⚠️ ПУСТО</span>
+                <span class="source-tag">{source[:15]}</span>
+            </div>
+        </div>
+"""
+                continue
+            
             if isinstance(title, bool):
                 title = "✅ Да" if title else "❌ Нет"
             elif title == '' or title == '—':
@@ -1244,10 +1230,9 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             
             link = item.get('link', '')
             
-            # Собираем дополнительные поля
             details = []
             for key, value in item.items():
-                if key in ['_source', 'title', 'text', 'extra', 'link', 'found', 'exists']:
+                if key in ['_source', 'title', 'text', 'extra', 'link', 'found', 'exists', 'empty']:
                     continue
                 if value and value != '—' and value != '':
                     if isinstance(value, str):
@@ -1259,16 +1244,12 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
                             if v and v != '—':
                                 details.append(f"{key}.{k}: {v}")
             
-            # Пропускаем только если совсем ничего нет
-            if not details and not text and not extra and (title == '—' or title == ''):
-                continue
-            
             html += f"""
         <div class="result-item">
             <div class="title">
                 <span class="index">#{idx}</span>
-                {title}
-                {f'<span class="source-tag">{source[:15]}</span>' if source else ''}
+                {title if title else '—'}
+                <span class="source-tag">{source[:15] if source else 'unknown'}</span>
                 {f'<a href="{link}" target="_blank">🔗</a>' if link else ''}
             </div>
 """
@@ -1277,13 +1258,15 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
             if extra:
                 html += f"            <div class=\"extra\">📎 {extra}</div>\n"
             if details:
-                for detail in details[:6]:
+                for detail in details[:8]:
                     html += f"            <div class=\"extra\">• {detail}</div>\n"
+            if not text and not extra and not details:
+                html += f"            <div class=\"extra\" style=\"color:#4a3a3a;\">⚠️ Нет данных для отображения</div>\n"
             html += "        </div>\n"
         
         html += f"""
         <div style="text-align:center; margin-top:20px; padding:12px; border:1px solid #1a2a1a; border-radius:8px; color:#4a6a4a; font-size:13px;">
-            📊 Показано {len(display_results)} из {total} найденных результатов
+            📊 Показано {len(display_results)} результатов из {total} найденных
         </div>
 """
     else:

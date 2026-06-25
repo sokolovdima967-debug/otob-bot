@@ -27,7 +27,7 @@ from PIL.ExifTags import TAGS
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
-DB_PATH = os.path.join("/var/data", "glaz_isidy_bot.db")
+DB_PATH = os.path.join("/tmp", "glaz_isidy_bot.db")
 SEARCH_TIMEOUT = 90
 TECH_MODE = False
 user_state = {}
@@ -65,14 +65,6 @@ def safe_send_message(chat_id, text, parse_mode="Markdown", reply_markup=None, m
         if "message is too long" in error_msg:
             return bot.send_message(chat_id, text[:2000] + "...\n\n⚠️ Сообщение обрезано", parse_mode=None, reply_markup=reply_markup)
         raise e
-
-def ensure_db_dir():
-    db_dir = os.path.dirname(DB_PATH)
-    if not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-
-# Вызови перед init_db()
-ensure_db_dir()
 
 def init_db():
     try:

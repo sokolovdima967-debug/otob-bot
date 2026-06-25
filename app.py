@@ -1555,7 +1555,7 @@ def users_command(message):
     except Exception as e:
         safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
-# ==================== ОБРАБОТЧИК ВЫБОРА РЕЖИМА ПОИСКА ====================
+# ==================== ФУНКЦИЯ ВЫПОЛНЕНИЯ ПОИСКА ====================
 
 def run_search_sync(chat_id, user_id, query, mode):
     """Синхронный запуск поиска (для callback)"""
@@ -1570,25 +1570,6 @@ def run_search_sync(chat_id, user_id, query, mode):
     except Exception as e:
         logger.error(f"Sync search error: {e}")
         safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('search_'))
-def search_mode_callback(call):
-    try:
-        user_id = call.from_user.id
-        query = user_state.get(f"search_query_{user_id}", "")
-        mode = call.data.replace('search_', '')
-        
-        bot.answer_callback_query(call.id, f"🔍 Поиск в режиме: {mode}")
-        
-        user_search_mode[user_id] = mode
-        
-        # Запускаем поиск синхронно
-        run_search_sync(call.message.chat.id, user_id, query, mode)
-    except Exception as e:
-        logger.error(f"Search mode error: {e}")
-        safe_send_message(call.message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-# ==================== ФУНКЦИЯ ВЫПОЛНЕНИЯ ПОИСКА ====================
 
 async def perform_search(chat_id, user_id, query, mode):
     try:
@@ -1812,6 +1793,261 @@ async def run_username_search(chat_id, user_id, query):
     except:
         pass
 
+# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК КОЛБЭКОВ ====================
+
+@bot.callback_query_handler(func=lambda call: True, priority=1)
+def global_callback_handler(call):
+    try:
+        # Отвечаем на callback, чтобы убрать "часики"
+        bot.answer_callback_query(call.id)
+        
+        data = call.data
+        
+        # ===== ОБРАБОТЧИК ВЫБОРА РЕЖИМА ПОИСКА =====
+        if data.startswith('search_'):
+            user_id = call.from_user.id
+            query = user_state.get(f"search_query_{user_id}", "")
+            mode = data.replace('search_', '')
+            
+            bot.answer_callback_query(call.id, f"🔍 Поиск в режиме: {mode}")
+            user_search_mode[user_id] = mode
+            
+            # Запускаем поиск синхронно
+            run_search_sync(call.message.chat.id, user_id, query, mode)
+            return
+        
+        # ===== ОБРАБОТЧИК СКРЫТИЯ ДАННЫХ =====
+        if data == "hide_data":
+            hide_data_callback(call)
+            return
+        
+        if data.startswith('approve_hide_') or data.startswith('reject_hide_'):
+            if data.startswith('approve_hide_'):
+                approve_hide(call)
+            else:
+                reject_hide(call)
+            return
+        
+        if data == "list_hide_requests":
+            list_hide_requests(call)
+            return
+        
+        if data == "send_contact_hide":
+            send_contact_hide(call)
+            return
+        
+        # ===== МЕНЮ =====
+        if data == "menu_back":
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "👁️ Глаз Исиды — OSINT\n\n"
+                "🕵️ Глубокий OSINT-поиск\n"
+                "Множество источников\n\n"
+                "⚡ Выбери действие:",
+                reply_markup=main_menu_keyboard()
+            )
+            return
+        
+        if data == "menu_profile":
+            user = call.from_user
+            user_data = get_user(user.id, user.username or "Unknown")
+            remaining = get_remaining(user.id)
+            text = (
+                "👤 Твой профиль\n\n"
+                f"🆔 ID: {user.id}\n"
+                f"👤 Username: @{user.username or 'нет'}\n"
+                f"📛 Имя: {user.first_name or '—'}\n\n"
+                f"📊 Использовано: {user_data['searches_today']}/5\n"
+                f"📊 Бонусных: {user_data['searches_extra']}\n"
+                f"📊 Осталось: {remaining}\n"
+                f"⏰ Сброс: в 00:00 МСК\n"
+                f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
+            )
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                text,
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "menu_balance":
+            user_id = call.from_user.id
+            remaining = get_remaining(user_id)
+            used = get_user(user_id)["searches_today"]
+            extra = get_user(user_id)["searches_extra"]
+            text = (
+                "📊 Твой баланс\n\n"
+                f"🔍 Использовано: {used}/5\n"
+                f"📊 Бонусных: {extra}\n"
+                f"📊 Осталось: {remaining}\n"
+                f"⏰ Сброс: в 00:00 МСК\n"
+                f"👑 Админ: {'♾️ безлимитный' if user_id == ADMIN_ID else 'нет'}"
+            )
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                text,
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "menu_help":
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "❓ Помощь\n\n"
+                "📌 Как пользоваться:\n"
+                "• Отправь номер, email, никнейм, IP или домен\n"
+                "• Выбери тип поиска\n\n"
+                "📊 Лимит: 5 поисков в день\n"
+                "👑 Админ: безлимитный доступ\n"
+                "🔒 Скрытие данных: отправь заявку админу\n\n"
+                "🛡️ @Arhapov",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "global_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "global"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "🌐 ГЛОБАЛЬНЫЙ ПОИСК\n\n"
+                "Отправь запрос для поиска:\n"
+                "• 📱 Номер: +79991234567\n"
+                "• 👤 ФИО: Иванов Иван Иванович\n"
+                "• 📧 Email: user@example.com\n"
+                "• 🌐 IP: 8.8.8.8\n"
+                "• 🌍 Домен: example.com\n\n"
+                "📌 Username и Telegram ID ищутся отдельно.",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "phone_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "phone"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "📱 ПРОВЕРКА ТЕЛЕФОНА\n\n"
+                "Отправь номер для проверки.\n\n"
+                "Пример: +79991234567\n\n"
+                "🔍 Оператор · Страна · Регион\n"
+                "🕵️ Утечки · Соцсети",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "email_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "global"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "📧 ПРОВЕРКА EMAIL\n\n"
+                "Отправь email для проверки.\n\n"
+                "Пример: user@example.com\n\n"
+                "🔍 Утечки · Репутация · Компания",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "username_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "username"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "👤 ПОИСК ПО USERNAME\n\n"
+                "Отправь никнейм для поиска.\n\n"
+                "Пример: username\n\n"
+                "🔍 Telegram · DuckDuckGo",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "domain_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "domain"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "🌐 ПОИСК ПО IP/ДОМЕНУ\n\n"
+                "Отправь IP или домен.\n\n"
+                "Пример IP: 8.8.8.8\n"
+                "Пример домена: example.com\n\n"
+                "🔍 Геолокация · WHOIS · DNS",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "geoint_search":
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "🌍 ГЕОИНТ\n\n"
+                "Отправь координаты или адрес.\n\n"
+                "Пример координат: 55.7558,37.6173\n"
+                "Пример адреса: Москва, Кремль",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "metadata_search":
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "🖼️ МЕТАДАННЫЕ ФОТО\n\n"
+                "Отправь ссылку на фото для извлечения EXIF-данных.\n\n"
+                "Пример: https://example.com/photo.jpg",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+        if data == "telegram_search":
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "📱 ПОИСК ПО TELEGRAM\n\n"
+                "Отправь username Telegram аккаунта.\n\n"
+                "Пример: @durov",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        
+    except Exception as e:
+        logger.error(f"❌ Global callback error: {e}")
+        try:
+            safe_send_message(call.message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+        except:
+            pass
+
 # ==================== ОБРАБОТЧИК ТЕКСТА ====================
 
 @bot.message_handler(func=lambda message: True)
@@ -1886,224 +2122,6 @@ def main_menu_keyboard():
         types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
     )
     return markup
-
-# ==================== ОБРАБОТЧИКИ МЕНЮ ====================
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    try:
-        bot.answer_callback_query(call.id)
-        
-        if call.data == "menu_back":
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "👁️ Глаз Исиды — OSINT\n\n"
-                "🕵️ Глубокий OSINT-поиск\n"
-                "Множество источников\n\n"
-                "⚡ Выбери действие:",
-                reply_markup=main_menu_keyboard()
-            )
-            return
-        
-        if call.data == "menu_profile":
-            user = call.from_user
-            user_data = get_user(user.id, user.username or "Unknown")
-            remaining = get_remaining(user.id)
-            text = (
-                "👤 Твой профиль\n\n"
-                f"🆔 ID: {user.id}\n"
-                f"👤 Username: @{user.username or 'нет'}\n"
-                f"📛 Имя: {user.first_name or '—'}\n\n"
-                f"📊 Использовано: {user_data['searches_today']}/5\n"
-                f"📊 Бонусных: {user_data['searches_extra']}\n"
-                f"📊 Осталось: {remaining}\n"
-                f"⏰ Сброс: в 00:00 МСК\n"
-                f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
-            )
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                text,
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "menu_balance":
-            user_id = call.from_user.id
-            remaining = get_remaining(user_id)
-            used = get_user(user_id)["searches_today"]
-            extra = get_user(user_id)["searches_extra"]
-            text = (
-                "📊 Твой баланс\n\n"
-                f"🔍 Использовано: {used}/5\n"
-                f"📊 Бонусных: {extra}\n"
-                f"📊 Осталось: {remaining}\n"
-                f"⏰ Сброс: в 00:00 МСК\n"
-                f"👑 Админ: {'♾️ безлимитный' if user_id == ADMIN_ID else 'нет'}"
-            )
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                text,
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "menu_help":
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "❓ Помощь\n\n"
-                "📌 Как пользоваться:\n"
-                "• Отправь номер, email, никнейм, IP или домен\n"
-                "• Выбери тип поиска\n\n"
-                "📊 Лимит: 5 поисков в день\n"
-                "👑 Админ: безлимитный доступ\n"
-                "🔒 Скрытие данных: отправь заявку админу\n\n"
-                "🛡️ @Arhapov",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "global_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "global"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "🌐 ГЛОБАЛЬНЫЙ ПОИСК\n\n"
-                "Отправь запрос для поиска:\n"
-                "• 📱 Номер: +79991234567\n"
-                "• 👤 ФИО: Иванов Иван Иванович\n"
-                "• 📧 Email: user@example.com\n"
-                "• 🌐 IP: 8.8.8.8\n"
-                "• 🌍 Домен: example.com\n\n"
-                "📌 Username и Telegram ID ищутся отдельно.",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "phone_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "phone"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "📱 ПРОВЕРКА ТЕЛЕФОНА\n\n"
-                "Отправь номер для проверки.\n\n"
-                "Пример: +79991234567\n\n"
-                "🔍 Оператор · Страна · Регион\n"
-                "🕵️ Утечки · Соцсети",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "email_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "global"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "📧 ПРОВЕРКА EMAIL\n\n"
-                "Отправь email для проверки.\n\n"
-                "Пример: user@example.com\n\n"
-                "🔍 Утечки · Репутация · Компания",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "username_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "username"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "👤 ПОИСК ПО USERNAME\n\n"
-                "Отправь никнейм для поиска.\n\n"
-                "Пример: username\n\n"
-                "🔍 Telegram · DuckDuckGo",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "domain_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "domain"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "🌐 ПОИСК ПО IP/ДОМЕНУ\n\n"
-                "Отправь IP или домен.\n\n"
-                "Пример IP: 8.8.8.8\n"
-                "Пример домена: example.com\n\n"
-                "🔍 Геолокация · WHOIS · DNS",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "geoint_search":
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "🌍 ГЕОИНТ\n\n"
-                "Отправь координаты или адрес.\n\n"
-                "Пример координат: 55.7558,37.6173\n"
-                "Пример адреса: Москва, Кремль",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "metadata_search":
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "🖼️ МЕТАДАННЫЕ ФОТО\n\n"
-                "Отправь ссылку на фото для извлечения EXIF-данных.\n\n"
-                "Пример: https://example.com/photo.jpg",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "telegram_search":
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "📱 ПОИСК ПО TELEGRAM\n\n"
-                "Отправь username Telegram аккаунта.\n\n"
-                "Пример: @durov",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "hide_data":
-            hide_data_callback(call)
-            return
-            
-    except Exception as e:
-        logger.error(f"❌ Callback error: {e}")
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 

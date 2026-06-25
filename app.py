@@ -82,6 +82,37 @@ def safe_edit_message(chat_id, message_id, text, parse_mode=None, reply_markup=N
             return None
         raise e
 
+def migrate_db():
+    """Обновляет структуру базы данных, если нужно"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        
+        # Проверяем, есть ли колонка username в hide_requests
+        cur.execute("PRAGMA table_info(hide_requests)")
+        columns = [col[1] for col in cur.fetchall()]
+        
+        if 'username' not in columns:
+            cur.execute("ALTER TABLE hide_requests ADD COLUMN username TEXT")
+            logger.info("✅ Добавлена колонка username в hide_requests")
+        
+        if 'contact_phone' not in columns:
+            cur.execute("ALTER TABLE hide_requests ADD COLUMN contact_phone TEXT")
+            logger.info("✅ Добавлена колонка contact_phone в hide_requests")
+        
+        # Проверяем hidden_data
+        cur.execute("PRAGMA table_info(hidden_data)")
+        columns = [col[1] for col in cur.fetchall()]
+        
+        if 'username' not in columns:
+            cur.execute("ALTER TABLE hidden_data ADD COLUMN username TEXT")
+            logger.info("✅ Добавлена колонка username в hidden_data")
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка миграции БД: {e}")
+
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -314,14 +345,21 @@ def detect_query_type(query: str) -> str:
 def get_user_data(user_id: int) -> dict:
     try:
         chat = bot.get_chat(user_id)
+        username = chat.username
+        if username:
+            username = username
+        else:
+            username = "нет"
+        
         return {
             "user_id": user_id,
-            "username": chat.username or "нет",
+            "username": username,
             "first_name": chat.first_name or "—",
             "last_name": chat.last_name or "—",
             "phone": None
         }
-    except:
+    except Exception as e:
+        logger.error(f"Get user data error: {e}")
         return {
             "user_id": user_id,
             "username": "нет",
@@ -340,7 +378,6 @@ def check_hidden_data(query: str) -> bool:
         if not hidden_rows:
             return False
         
-        # Проверяем все варианты
         for row in hidden_rows:
             owner_id, phone, fio = row
             if phone and query == phone:
@@ -1376,12 +1413,16 @@ def handle_contact(message):
         contact = message.contact
         user_state.pop(user_id, None)
         
+        username = message.from_user.username
+        if not username:
+            username = "нет"
+        
         user_state[f"hide_contact_{user_id}"] = {
             "phone": contact.phone_number,
             "user_id": contact.user_id,
             "first_name": contact.first_name,
             "last_name": contact.last_name,
-            "username": message.from_user.username
+            "username": username
         }
         
         markup = types.ReplyKeyboardRemove()
@@ -1391,7 +1432,7 @@ def handle_contact(message):
             user_id,
             f"✅ Контакт получен!\n\n"
             f"📱 Номер: {contact.phone_number}\n"
-            f"👤 Username: @{message.from_user.username or 'нет'}\n"
+            f"👤 Username: @{username}\n"
             f"🆔 ID: {user_id}\n\n"
             f"📝 Теперь отправь ФИО для скрытия:\n\n"
             f"Пример: Иванов Иван Иванович",
@@ -1405,7 +1446,6 @@ def process_hide_fio(message):
     fio = message.text.strip()
     user_state.pop(user_id, None)
     
-    # Проверяем, что ФИО корректное
     if not re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', fio):
         safe_send_message(
             user_id,
@@ -1417,7 +1457,10 @@ def process_hide_fio(message):
         return
     
     contact = user_state.get(f"hide_contact_{user_id}", {})
-    user_data = get_user_data(user_id)
+    
+    username = message.from_user.username
+    if not username:
+        username = "нет"
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -1428,7 +1471,7 @@ def process_hide_fio(message):
             ) VALUES (?, ?, ?, ?, ?, 'pending')
         ''', (
             user_id,
-            user_data.get('username') or message.from_user.username or 'нет',
+            username,
             contact.get('phone') or '—',
             contact.get('phone') or '—',
             fio
@@ -1439,7 +1482,7 @@ def process_hide_fio(message):
         
         admin_text = (
             f"🔔 Новая заявка на скрытие данных # {request_id}\n\n"
-            f"👤 Пользователь: @{user_data.get('username') or 'нет'} | {user_id}\n"
+            f"👤 Пользователь: @{username} | {user_id}\n"
             f"📱 Контактный телефон: {contact.get('phone') or '—'}\n"
             f"👤 ФИО для скрытия: {fio}"
         )
@@ -1453,9 +1496,10 @@ def process_hide_fio(message):
         
         safe_send_message(
             user_id,
-            "✅ Заявка отправлена!\n\n"
+            f"✅ Заявка отправлена!\n\n"
             f"📋 ФИО для скрытия: {fio}\n"
             f"📱 Телефон: {contact.get('phone') or '—'}\n"
+            f"👤 Username: @{username}\n"
             f"🆔 ID: {user_id}\n\n"
             f"⏳ Ожидай решения администратора."
         )
@@ -1495,10 +1539,11 @@ def approve_hide(call):
         
         safe_send_message(
             user_id,
-            "✅ Ваша заявка на скрытие данных ОДОБРЕНА!\n\n"
+            f"✅ Ваша заявка на скрытие данных ОДОБРЕНА!\n\n"
             f"🔒 Теперь эти данные скрыты от поиска:\n"
             f"📱 Телефон: {phone or '—'}\n"
             f"👤 ФИО: {fio}\n"
+            f"👤 Username: @{username}\n"
             f"🆔 ID: {user_id}"
         )
         safe_send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
@@ -2179,6 +2224,7 @@ def handle_text(message):
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
+    migrate_db()  # <--- ДОБАВЛЯЕМ МИГРАЦИЮ
     init_db()
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
     logger.info("🛡️ Канал: @Arhapov")

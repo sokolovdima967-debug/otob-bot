@@ -21,12 +21,16 @@ from phonenumbers import carrier, geocoder, timezone as phone_timezone
 import pytz
 import dns.resolver
 from curl_cffi import requests as curl_requests
+from PIL import Image
+from PIL.ExifTags import TAGS
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 DB_PATH = os.path.join("/tmp", "glaz_isidy_bot.db")
-SEARCH_TIMEOUT = 120
+SEARCH_TIMEOUT = 90
+TECH_MODE = False
+user_state = {}
 
 # ===== КЛЮЧИ API =====
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
@@ -58,6 +62,35 @@ def init_db():
                 searches_today INTEGER DEFAULT 0,
                 searches_extra INTEGER DEFAULT 0,
                 last_reset DATE DEFAULT CURRENT_DATE
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS hide_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                phone TEXT,
+                email TEXT,
+                fio TEXT,
+                username TEXT,
+                ip TEXT,
+                domain TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                reviewed_by INTEGER
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS hidden_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                phone TEXT,
+                email TEXT,
+                fio TEXT,
+                username TEXT,
+                ip TEXT,
+                domain TEXT,
+                hidden_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id)
             )
         ''')
         conn.commit()
@@ -253,24 +286,19 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-# ==================== НОВЫЙ ПАРСЕР С ОБХОДОМ БЛОКИРОВОК ====================
+# ==================== ПАРСЕР С ОБХОДОМ ====================
 
 async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) -> list:
-    """
-    Парсит сайт с имитацией браузера через curl_cffi (обход Cloudflare)
-    """
+    headers = {
+        "User-Agent": ua.random,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
     results = []
     try:
-        headers = {
-            "User-Agent": ua.random,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        }
-        
-        # Используем curl_cffi в отдельном потоке (синхронно, но не блокируем)
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
@@ -282,7 +310,6 @@ async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) 
                 verify=False
             )
         )
-        
         if response.status_code == 200:
             html = response.text
             soup = BeautifulSoup(html, 'html5lib')
@@ -306,196 +333,8 @@ async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) 
         logger.error(f"Parse error for {url}: {e}")
     return results
 
-# ==================== НОВЫЕ ИНСТРУМЕНТЫ (БЕЗ КЛЮЧЕЙ) ====================
+# ==================== ВСЕ ФУНКЦИИ ПОИСКА ====================
 
-# ----- 1. EPIEOS (соцсети по email/номеру) -----
-async def epieos_lookup(query: str) -> dict:
-    try:
-        url = f"https://epieos.com/api/check?query={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "found": True,
-                        "social": data.get('social', {}),
-                        "google": data.get('google', {}),
-                        "breaches": data.get('breaches', [])[:5]
-                    }
-    except:
-        pass
-    return {"found": False}
-
-# ----- 2. SYNC.ME (имя + спам) -----
-async def syncme_lookup(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://sync.me/search?q={clean}"
-        return await parse_syncme_whoseno(url, "syncme")
-    except:
-        return {"found": False}
-
-# ----- 3. WHOSENO (имя владельца) -----
-async def whoseno_lookup(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://whoseno.com/search?q={clean}"
-        return await parse_syncme_whoseno(url, "whoseno")
-    except:
-        return {"found": False}
-
-# ----- 4. REVEALNAME (имя + оператор) -----
-async def revealname_lookup(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://revealname.com/phone/{clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|owner|result'))
-                    if name:
-                        return {"found": True, "name": name.get_text(strip=True)}
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ----- 5. LEAK-LOOKUP (утечки) -----
-async def leaklookup_lookup(query: str) -> dict:
-    try:
-        url = f"https://leak-lookup.com/api/search?query={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('found'):
-                        return {
-                            "found": True,
-                            "sources": data.get('sources', [])[:5]
-                        }
-    except:
-        pass
-    return {"found": False}
-
-# ----- 6. NOIMOSINY (30+ сервисов) -----
-async def noimosiny_lookup(query: str) -> list:
-    try:
-        url = f"https://noimosiny.com/api/search?q={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('results', [])[:10]
-    except:
-        pass
-    return []
-
-# ----- 7. OSINT.INDUSTRIES (10+ соцсетей) -----
-async def osint_industries_lookup(query: str) -> list:
-    try:
-        url = f"https://osint.industries/api/search?q={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('results', [])[:10]
-    except:
-        pass
-    return []
-
-# ----- 8. X-RAY.CONTACT (с обходом через curl) -----
-async def xray_lookup(query: str) -> list:
-    try:
-        url = f"https://x-ray.contact/search?q={query}"
-        selectors = {
-            "result": ".result-item, .social-link, .profile-item",
-            "title": ".title, .name",
-            "link": "a",
-            "text": ".description",
-            "extra": ".extra"
-        }
-        return await parse_site_with_curl(url, selectors, 5)
-    except:
-        return []
-
-# ----- 9. TRUEPEOPLESEARCH (с обходом через curl) -----
-async def truepeoplesearch_lookup(query: str) -> list:
-    try:
-        if re.search(r'\d', query):
-            url = f"https://truepeoplesearch.com/results?phoneno={query}"
-        else:
-            url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
-        selectors = {
-            "result": ".card, .person-item",
-            "title": ".name, .title",
-            "text": ".description",
-            "extra": ".address, .phone, .relatives"
-        }
-        return await parse_site_with_curl(url, selectors, 5)
-    except:
-        return []
-
-# ----- 10. FASTPEOPLESEARCH (с обходом через curl) -----
-async def fastpeoplesearch_lookup(phone: str) -> list:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://www.fastpeoplesearch.com/phone/{clean}"
-        selectors = {
-            "result": ".result, .person-item",
-            "title": ".name, .title",
-            "text": ".description",
-            "extra": ".address"
-        }
-        return await parse_site_with_curl(url, selectors, 5)
-    except:
-        return []
-
-# ----- 11. THATSTHEM (с обходом через curl) -----
-async def thatsthem_lookup(phone: str) -> list:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://thatsthem.com/phone/{clean}"
-        selectors = {
-            "result": ".result, .person, .card",
-            "title": ".name, .fullname",
-            "text": ".address, .location",
-            "extra": ".age, .relatives, .phone"
-        }
-        return await parse_site_with_curl(url, selectors, 5)
-    except:
-        return []
-
-# ==================== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ SYNC.ME / WHOSENO ====================
-
-async def parse_syncme_whoseno(url: str, source: str) -> dict:
-    try:
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title'))
-                    if source == "syncme":
-                        spam = soup.find('span', class_=re.compile('spam|risk'))
-                        return {
-                            "found": True if name else False,
-                            "name": name.get_text(strip=True) if name else "—",
-                            "spam_level": spam.get_text(strip=True) if spam else "—"
-                        }
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—"
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-# ==================== ОСТАЛЬНЫЕ ФУНКЦИИ ПОИСКА (СТАРЫЕ) ====================
-
-# ----- PHONENUMBERS -----
 async def phonenumbers_info(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -517,7 +356,6 @@ async def phonenumbers_info(phone: str) -> dict:
         logger.error(f"Phonenumbers error: {e}")
         return None
 
-# ----- WHATSAPP -----
 async def whatsapp_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -530,7 +368,6 @@ async def whatsapp_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
-# ----- TELEGRAM -----
 async def telegram_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -543,7 +380,6 @@ async def telegram_check(phone: str) -> dict:
     except:
         return {"found": False, "exists": False}
 
-# ----- NUMVERIFY -----
 async def numverify_lookup(phone: str) -> dict:
     if not NUMVERIFY_KEY:
         return None
@@ -563,7 +399,6 @@ async def numverify_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-# ----- ABSTRACTAPI -----
 async def abstractapi_lookup(phone: str) -> dict:
     if not ABSTRACT_API_KEY:
         return None
@@ -583,7 +418,6 @@ async def abstractapi_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-# ----- HUNTER.IO -----
 async def hunter_lookup(email: str) -> dict:
     if not HUNTER_KEY:
         return None
@@ -603,7 +437,6 @@ async def hunter_lookup(email: str) -> dict:
                 }
     return {"found": False}
 
-# ----- EMAILREP -----
 async def emailrep_lookup(email: str) -> dict:
     url = f"https://emailrep.io/{email}"
     async with aiohttp.ClientSession() as session:
@@ -618,7 +451,6 @@ async def emailrep_lookup(email: str) -> dict:
                 }
     return {"found": False}
 
-# ----- LEAKCHECK -----
 async def leakcheck_lookup(query: str) -> dict:
     url = f"https://leakcheck.io/api/public?check={query}"
     async with aiohttp.ClientSession() as session:
@@ -634,7 +466,6 @@ async def leakcheck_lookup(query: str) -> dict:
                     }
     return {"found": False}
 
-# ----- HUDSON ROCK -----
 async def hudsonrock_lookup(phone: str) -> dict:
     clean = clean_phone(phone)
     url = f"https://cavalier.hudsonrock.com/api/v1/search-by-username?username={clean}"
@@ -650,7 +481,6 @@ async def hudsonrock_lookup(phone: str) -> dict:
                     }
     return {"found": False}
 
-# ----- HIBP -----
 async def hibp_lookup(email: str) -> list:
     url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
     async with aiohttp.ClientSession() as session:
@@ -660,7 +490,6 @@ async def hibp_lookup(email: str) -> list:
                 return [b.get('Name') for b in data]
     return []
 
-# ----- IPINFO -----
 async def ipinfo_lookup(ip: str) -> dict:
     url = f"https://ipinfo.io/{ip}/json"
     async with aiohttp.ClientSession() as session:
@@ -676,7 +505,6 @@ async def ipinfo_lookup(ip: str) -> dict:
                 }
     return {"found": False}
 
-# ----- IP-API -----
 async def ip_api_lookup(ip: str) -> dict:
     url = f"http://ip-api.com/json/{ip}"
     async with aiohttp.ClientSession() as session:
@@ -694,7 +522,6 @@ async def ip_api_lookup(ip: str) -> dict:
                     }
     return {"found": False}
 
-# ----- SHODAN -----
 async def shodan_lookup(ip: str) -> dict:
     if not SHODAN_KEY:
         return None
@@ -713,7 +540,6 @@ async def shodan_lookup(ip: str) -> dict:
                 }
     return {"found": False}
 
-# ----- VIRUSTOTAL -----
 async def virustotal_lookup(domain: str) -> dict:
     if not VIRUSTOTAL_KEY:
         return None
@@ -732,7 +558,6 @@ async def virustotal_lookup(domain: str) -> dict:
                 }
     return {"found": False}
 
-# ----- DEHASHED -----
 async def dehashed_lookup(query: str) -> dict:
     if not DEHASHED_KEY or not DEHASHED_EMAIL:
         return None
@@ -749,31 +574,51 @@ async def dehashed_lookup(query: str) -> dict:
                 }
     return {"found": False}
 
-# ----- DUCKDUCKGO -----
-async def ddg_search(query: str) -> list:
+async def duckduckgo_search(query: str) -> list:
     url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result", "title": ".result__title a", "link": "a", "text": ".result__snippet"}
     return await parse_site_with_curl(url, selectors, 5)
 
-# ----- SOCIALSEARCH -----
 async def socialsearch_lookup(query: str) -> list:
     url = f"https://socialsearch.io/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .profile, .card", "title": ".name, .title", "link": "a", "text": ".description", "extra": ".url, .handle"}
     return await parse_site_with_curl(url, selectors, 5)
 
-# ----- PIPL -----
 async def pipl_lookup(query: str) -> list:
     url = f"https://pipl.com/search/?q={query.replace(' ', '+')}"
     selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "link": "a", "text": ".bio, .description", "extra": ".location, .email, .phone, .social"}
     return await parse_site_with_curl(url, selectors, 5)
 
-# ----- IDCRAWL -----
+async def xray_lookup(query: str) -> list:
+    url = f"https://x-ray.contact/search?q={query}"
+    selectors = {"result": ".result-item, .social-link, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
+    return await parse_site_with_curl(url, selectors, 5)
+
 async def idcrawl_lookup(query: str) -> list:
     url = f"https://idcrawl.com/{query}"
     selectors = {"result": ".result-item, .profile-item", "title": ".title, .name", "link": "a", "text": ".description", "extra": ".extra"}
     return await parse_site_with_curl(url, selectors, 5)
 
-# ----- WHITEPAGES -----
+async def truepeoplesearch_lookup(query: str) -> list:
+    if re.search(r'\d', query):
+        url = f"https://truepeoplesearch.com/results?phoneno={query}"
+    else:
+        url = f"https://truepeoplesearch.com/results?name={query.replace(' ', '+')}"
+    selectors = {"result": ".card, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address, .phone, .relatives"}
+    return await parse_site_with_curl(url, selectors, 5)
+
+async def fastpeoplesearch_parse(phone: str) -> list:
+    clean = clean_phone(phone)
+    url = f"https://www.fastpeoplesearch.com/phone/{clean}"
+    selectors = {"result": ".result, .person-item", "title": ".name, .title", "text": ".description", "extra": ".address"}
+    return await parse_site_with_curl(url, selectors, 5)
+
+async def thatsthem_lookup(phone: str) -> list:
+    clean = clean_phone(phone)
+    url = f"https://thatsthem.com/phone/{clean}"
+    selectors = {"result": ".result, .person, .card", "title": ".name, .fullname", "text": ".address, .location", "extra": ".age, .relatives, .phone"}
+    return await parse_site_with_curl(url, selectors, 5)
+
 async def whitepages_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -788,7 +633,22 @@ async def whitepages_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- CALLERID -----
+async def revealname_check(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://revealname.com/phone/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|owner|result'))
+                    if name:
+                        return {"found": True, "name": name.get_text(strip=True)}
+                return {"found": False}
+    except:
+        return {"found": False}
+
 async def callerid_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -805,7 +665,6 @@ async def callerid_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- SPYDIALER -----
 async def spydialer_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -820,7 +679,6 @@ async def spydialer_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- USPHONEBOOK -----
 async def usphonebook_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -837,7 +695,6 @@ async def usphonebook_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- 411.COM -----
 async def fouroneone_check(phone: str) -> dict:
     try:
         clean = clean_phone(phone)
@@ -854,7 +711,6 @@ async def fouroneone_check(phone: str) -> dict:
     except:
         return {"found": False}
 
-# ----- GOOGLE DORKS -----
 async def google_dorks_search(query: str) -> list:
     results = []
     dorks = [
@@ -887,7 +743,6 @@ async def google_dorks_search(query: str) -> list:
             continue
     return results
 
-# ----- DNS ENUM -----
 async def dns_enum(domain: str) -> list:
     try:
         records = ['A', 'MX', 'NS', 'TXT', 'CNAME', 'SOA']
@@ -903,7 +758,6 @@ async def dns_enum(domain: str) -> list:
     except:
         return []
 
-# ----- AHMIA -----
 async def ahmia_search(query: str) -> list:
     try:
         url = f"https://ahmia.fi/search/?q={query}"
@@ -931,7 +785,6 @@ async def ahmia_search(query: str) -> list:
         logger.error(f"Ahmia error: {e}")
     return []
 
-# ----- EXONERA TOR -----
 async def exonera_check(ip: str) -> dict:
     try:
         url = f"https://exonerator.torproject.org/api/?ip={ip}"
@@ -949,7 +802,6 @@ async def exonera_check(ip: str) -> dict:
         logger.error(f"Exonera error: {e}")
     return {"found": False}
 
-# ----- INTELX -----
 async def intelx_lookup(query: str) -> dict:
     if not INTELX_KEY:
         return None
@@ -981,7 +833,6 @@ async def intelx_lookup(query: str) -> dict:
         logger.error(f"IntelX error: {e}")
         return {"found": False}
 
-# ----- WHATCMS -----
 async def whatcms_lookup(domain: str) -> dict:
     if not WHATCMS_KEY:
         return None
@@ -1005,11 +856,221 @@ async def whatcms_lookup(domain: str) -> dict:
         logger.error(f"WhatCMS error: {e}")
         return {"found": False}
 
+async def geoint_lookup(query: str) -> dict:
+    try:
+        if re.match(r'^-?\d{1,3}\.\d+,-?\d{1,3}\.\d+$', query):
+            lat, lon = query.split(',')
+            url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return {
+                            "found": True,
+                            "address": data.get('display_name', '—'),
+                            "lat": lat,
+                            "lon": lon
+                        }
+        else:
+            url = f"https://nominatim.openstreetmap.org/search?q={query}&format=json"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data:
+                            return {
+                                "found": True,
+                                "address": data[0].get('display_name', '—'),
+                                "lat": data[0].get('lat', '—'),
+                                "lon": data[0].get('lon', '—')
+                            }
+    except:
+        pass
+    return {"found": False}
+
+async def metadata_lookup(file_url: str) -> dict:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url, timeout=15) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    temp_path = f"/tmp/temp_{int(time.time())}.jpg"
+                    with open(temp_path, 'wb') as f:
+                        f.write(data)
+                    img = Image.open(temp_path)
+                    exifdata = img.getexif()
+                    result = {}
+                    for tag_id, value in exifdata.items():
+                        tag = TAGS.get(tag_id, tag_id)
+                        if isinstance(value, bytes):
+                            try:
+                                value = value.decode('utf-8', errors='ignore')
+                            except:
+                                value = str(value)
+                        result[tag] = value
+                    os.remove(temp_path)
+                    return {
+                        "found": True,
+                        "metadata": result,
+                        "size": len(data),
+                        "format": img.format
+                    }
+    except:
+        pass
+    return {"found": False}
+
+async def telegram_account_search(username: str) -> dict:
+    try:
+        clean = username.replace('@', '').strip()
+        url = f"https://t.me/{clean}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('tgme_page_title'))
+                    bio = soup.find('div', class_=re.compile('tgme_page_description'))
+                    photo = soup.find('img', class_=re.compile('tgme_page_photo_image'))
+                    return {
+                        "found": True,
+                        "username": clean,
+                        "name": name.get_text(strip=True) if name else "—",
+                        "bio": bio.get_text(strip=True) if bio else "—",
+                        "photo_url": photo.get('src') if photo else "—",
+                        "url": f"https://t.me/{clean}"
+                    }
+                return {"found": False}
+    except:
+        return {"found": False}
+
+async def syncme_lookup(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://sync.me/search?q={clean}"
+        headers = {"User-Agent": ua.random}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|title'))
+                    spam = soup.find('span', class_=re.compile('spam|risk'))
+                    return {
+                        "found": True if name else False,
+                        "name": name.get_text(strip=True) if name else "—",
+                        "spam_level": spam.get_text(strip=True) if spam else "—"
+                    }
+                return {"found": False}
+    except:
+        return {"found": False}
+
+async def whoseno_lookup(phone: str) -> dict:
+    try:
+        clean = clean_phone(phone)
+        url = f"https://whoseno.com/search?q={clean}"
+        headers = {"User-Agent": ua.random}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html5lib')
+                    name = soup.find('div', class_=re.compile('name|result|contact'))
+                    return {
+                        "found": True if name else False,
+                        "name": name.get_text(strip=True) if name else "—"
+                    }
+                return {"found": False}
+    except:
+        return {"found": False}
+
+async def leaklookup_lookup(query: str) -> dict:
+    try:
+        url = f"https://leak-lookup.com/api/search?query={query}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('found'):
+                        return {
+                            "found": True,
+                            "sources": data.get('sources', [])[:5]
+                        }
+    except:
+        pass
+    return {"found": False}
+
+async def noimosiny_lookup(query: str) -> list:
+    try:
+        url = f"https://noimosiny.com/api/search?q={query}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('results', [])[:10]
+    except:
+        pass
+    return []
+
+async def osint_industries_lookup(query: str) -> list:
+    try:
+        url = f"https://osint.industries/api/search?q={query}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('results', [])[:10]
+    except:
+        pass
+    return []
+
+async def epieos_lookup(query: str) -> dict:
+    try:
+        url = f"https://epieos.com/api/check?query={query}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {
+                        "found": True,
+                        "social": data.get('social', {}),
+                        "google": data.get('google', {}),
+                        "breaches": data.get('breaches', [])[:5]
+                    }
+    except:
+        pass
+    return {"found": False}
+
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
     qtype = detect_query_type(query)
+    
+    # ====== ПРОВЕРКА СКРЫТЫХ ДАННЫХ ======
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT user_id FROM hidden_data 
+            WHERE phone = ? OR email = ? OR fio = ? OR username = ? OR ip = ? OR domain = ?
+        ''', (query, query, query, query, query, query))
+        hidden_row = cur.fetchone()
+        conn.close()
+        if hidden_row:
+            return {
+                "query": query,
+                "type": qtype,
+                "sources": {
+                    "hidden": {
+                        "found": True,
+                        "message": "🔒 *Человек скрыл свои данные*\n\nДанные этого пользователя скрыты по его запросу.",
+                        "hidden": True
+                    }
+                },
+                "total_results": 1
+            }
+    except:
+        pass
     
     result = {
         "query": query,
@@ -1023,9 +1084,7 @@ async def global_lookup(query: str) -> dict:
     tasks = []
     
     if qtype == "phone":
-        clean = clean_phone(query)
         tasks = [
-            # ====== ОСНОВНЫЕ ======
             ("phonenumbers", run_with_timeout(phonenumbers_info(query), 8)),
             ("whatsapp", run_with_timeout(whatsapp_check(query), 6)),
             ("telegram", run_with_timeout(telegram_check(query), 6)),
@@ -1034,33 +1093,27 @@ async def global_lookup(query: str) -> dict:
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
             ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 8)),
             ("dehashed", run_with_timeout(dehashed_lookup(query), 8)),
-            
-            # ====== НОВЫЕ ИНСТРУМЕНТЫ ======
             ("syncme", run_with_timeout(syncme_lookup(query), 8)),
             ("whoseno", run_with_timeout(whoseno_lookup(query), 8)),
-            ("revealname", run_with_timeout(revealname_lookup(query), 8)),
+            ("revealname", run_with_timeout(revealname_check(query), 8)),
             ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
             ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
             ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
             ("epieos", run_with_timeout(epieos_lookup(query), 10)),
-            
-            # ====== ПАРСЕРЫ С ОБХОДОМ ======
             ("xray", run_with_timeout(xray_lookup(query), 10)),
             ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 10)),
-            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_lookup(query), 10)),
+            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 10)),
             ("thatsthem", run_with_timeout(thatsthem_lookup(query), 10)),
             ("whitepages", run_with_timeout(whitepages_check(query), 8)),
             ("callerid", run_with_timeout(callerid_check(query), 8)),
             ("spydialer", run_with_timeout(spydialer_check(query), 8)),
             ("usphonebook", run_with_timeout(usphonebook_check(query), 8)),
             ("fouroneone", run_with_timeout(fouroneone_check(query), 8)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
             ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
             ("pipl", run_with_timeout(pipl_lookup(query), 8)),
             ("idcrawl", run_with_timeout(idcrawl_lookup(query), 8)),
             ("google_dorks", run_with_timeout(google_dorks_search(query), 10)),
-            
-            # ====== ДАРКНЕТ ======
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
@@ -1078,7 +1131,7 @@ async def global_lookup(query: str) -> dict:
             ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
             ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
             ("pipl", run_with_timeout(pipl_lookup(query), 8)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
@@ -1089,7 +1142,7 @@ async def global_lookup(query: str) -> dict:
             ("idcrawl", run_with_timeout(idcrawl_lookup(query), 8)),
             ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
             ("pipl", run_with_timeout(pipl_lookup(query), 8)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
             ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
             ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
@@ -1104,7 +1157,7 @@ async def global_lookup(query: str) -> dict:
             ("ip_api", run_with_timeout(ip_api_lookup(query), 6)),
             ("shodan", run_with_timeout(shodan_lookup(query), 8)),
             ("exonera", run_with_timeout(exonera_check(query), 8)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
             ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
         ]
     
@@ -1113,12 +1166,12 @@ async def global_lookup(query: str) -> dict:
             ("virustotal", run_with_timeout(virustotal_lookup(query), 8)),
             ("dns_enum", run_with_timeout(dns_enum(query), 8)),
             ("whatcms", run_with_timeout(whatcms_lookup(query), 8)),
-            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
         ]
     else:
         tasks = [
-            ("duckduckgo", run_with_timeout(ddg_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
@@ -1406,253 +1459,334 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 """
     return html
 
-# ==================== МЕНЮ ====================
+# ==================== СКРЫТИЕ ДАННЫХ ====================
 
-def main_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👁️ ГЛОБАЛЬНЫЙ ПОИСК", callback_data="global_search")
+@bot.callback_query_handler(func=lambda call: call.data == "hide_data")
+def hide_data_callback(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🔒 *Скрытие данных*\n\n"
+        "📌 Отправь данные для скрытия (через запятую):\n\n"
+        "• Номер телефона\n• Email\n• ФИО\n• Username\n• IP\n• Домен\n\n"
+        "Пример: `+79991234567, user@example.com, Иванов Иван`\n\n"
+        "⏳ После отправки заявка будет рассмотрена админом.",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="Markdown",
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+        )
     )
-    markup.add(
-        types.InlineKeyboardButton("📱 ТЕЛЕФОН", callback_data="phone_search"),
-        types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👤 USERNAME", callback_data="username_search"),
-        types.InlineKeyboardButton("🌐 IP/ДОМЕН", callback_data="domain_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile"),
-        types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance")
-    )
-    markup.add(
-        types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help"),
-        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
-    )
-    return markup
+    user_state[user_id] = "awaiting_hide_data"
 
-def functions_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🌐 Глобальный поиск", callback_data="global_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📧 Email", callback_data="email_search"),
-        types.InlineKeyboardButton("📱 Телефон", callback_data="phone_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👤 Username", callback_data="username_search"),
-        types.InlineKeyboardButton("🌐 IP/Домен", callback_data="domain_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-    )
-    return markup
-
-# ==================== ОБРАБОТЧИКИ ====================
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
+@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_data")
+def process_hide_data(message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    user_state.pop(user_id, None)
+    items = [x.strip() for x in text.split(',')]
+    data = {"phone": None, "email": None, "fio": None, "username": None, "ip": None, "domain": None}
+    for item in items:
+        if re.search(r'^\+?\d{10,15}$', re.sub(r'[\s\-()]', '', item)):
+            data["phone"] = item
+        elif re.search(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', item):
+            data["email"] = item
+        elif re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', item):
+            data["fio"] = item
+        elif re.search(r'^[a-zA-Z0-9_]{3,30}$', item):
+            data["username"] = item
+        elif re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', item):
+            data["ip"] = item
+        elif "." in item and len(item.split()) == 1:
+            data["domain"] = item
     try:
-        bot.answer_callback_query(call.id)
-        
-        if call.data == "menu_back":
-            bot.edit_message_text(
-                "👁️ *Глаз Исиды — OSINT*\n\n"
-                "🕵️ *Глубокий OSINT-поиск*\n"
-                "45+ источников\n"
-                "ФИО · Адреса · Утечки · Соцсети · Даркнет\n\n"
-                "⚡ *Выбери действие:*",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard()
-            )
-            return
-        
-        if call.data == "menu_profile":
-            user = call.from_user
-            user_data = get_user(user.id, user.username or "Unknown")
-            remaining = get_remaining(user.id)
-            text = (
-                "👤 *Твой профиль*\n\n"
-                f"🆔 ID: `{user.id}`\n"
-                f"👤 Username: @{user.username or 'нет'}\n"
-                f"📛 Имя: {user.first_name or '—'}\n\n"
-                f"📊 Использовано: {user_data['searches_today']}/5\n"
-                f"📊 Бонусных: {user_data['searches_extra']}\n"
-                f"📊 Осталось: {remaining}\n"
-                f"⏰ Сброс: в 00:00 МСК\n"
-                f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
-            )
-            bot.edit_message_text(
-                text,
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "menu_balance":
-            user_id = call.from_user.id
-            remaining = get_remaining(user_id)
-            used = get_user(user_id)["searches_today"]
-            extra = get_user(user_id)["searches_extra"]
-            text = (
-                "📊 *Твой баланс*\n\n"
-                f"🔍 Использовано: {used}/5\n"
-                f"📊 Бонусных: {extra}\n"
-                f"📊 Осталось: {remaining}\n"
-                f"⏰ Сброс: в 00:00 МСК\n"
-                f"👑 Админ: {'♾️ безлимитный' if user_id == ADMIN_ID else 'нет'}"
-            )
-            bot.edit_message_text(
-                text,
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "menu_help":
-            bot.edit_message_text(
-                "❓ *Помощь*\n\n"
-                "📌 *Как пользоваться:*\n"
-                "• Отправь номер, email, никнейм, IP или домен\n"
-                "• Глобальный поиск — всё в одном запросе\n\n"
-                "🧅 *Даркнет:*\n"
-                "• Ahmia — поиск .onion сайтов\n"
-                "• Exonera Tor — проверка IP в сети Tor\n"
-                "• IntelX — утечки, Tor, I2P\n\n"
-                "📊 *Лимит:* 5 поисков в день (сброс в 00:00 МСК)\n"
-                "👑 *Админ:* безлимитный доступ\n\n"
-                "🛡️ *Канал:* @Arhapov\n"
-                "👁️ *Глаз Исиды — OSINT*",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "global_search":
-            bot.edit_message_text(
-                "🌐 *ГЛОБАЛЬНЫЙ ПОИСК*\n\n"
-                "Отправь запрос для поиска:\n"
-                "• 📱 Номер: `+79991234567`\n"
-                "• 👤 ФИО: `Иванов Иван Иванович`\n"
-                "• 📧 Email: `user@example.com`\n"
-                "• 🆔 Никнейм: `username`\n"
-                "• 🌐 IP: `8.8.8.8`\n"
-                "• 🌍 Домен: `example.com`\n\n"
-                "⚡ *45+ OSINT-источников*\n"
-                "🕵️ ФИО · Адреса · Утечки · Соцсети\n"
-                "🧅 Даркнет: Ahmia · Exonera Tor · IntelX",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "email_search":
-            bot.edit_message_text(
-                "📧 *ПРОВЕРКА EMAIL*\n\n"
-                "Отправь email для проверки.\n\n"
-                "Пример: `user@example.com`\n\n"
-                "🔍 Утечки · Репутация · Компания\n"
-                "🧅 Поиск в даркнете (Ahmia, IntelX)",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "phone_search":
-            bot.edit_message_text(
-                "📱 *ПРОВЕРКА ТЕЛЕФОНА*\n\n"
-                "Отправь номер для проверки.\n\n"
-                "Пример: `+79991234567`\n\n"
-                "🔍 ФИО · Адреса · Утечки · Соцсети\n"
-                "🧅 Поиск в даркнете (Ahmia, IntelX)",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "username_search":
-            bot.edit_message_text(
-                "👤 *ПОИСК ПО USERNAME*\n\n"
-                "Отправь никнейм для поиска.\n\n"
-                "Пример: `username`\n\n"
-                "🔍 GitHub · Telegram · Соцсети · Утечки\n"
-                "🧅 Поиск в даркнете (Ahmia, IntelX)",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-        
-        if call.data == "domain_search":
-            bot.edit_message_text(
-                "🌐 *ПОИСК ПО IP/ДОМЕНУ*\n\n"
-                "Отправь IP или домен.\n\n"
-                "Пример IP: `8.8.8.8`\n"
-                "Пример домена: `example.com`\n\n"
-                "🔍 Геолокация · WHOIS · SSL · DNS · CMS\n"
-                "🧅 Проверка Tor-релея (Exonera) · Поиск в даркнете",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                )
-            )
-            return
-            
-    except Exception as e:
-        logger.error(f"❌ Callback error: {e}")
-
-# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
-
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    try:
-        remaining = get_remaining(message.from_user.id)
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO hide_requests (user_id, phone, email, fio, username, ip, domain, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+        ''', (user_id, data["phone"], data["email"], data["fio"], data["username"], data["ip"], data["domain"]))
+        request_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        admin_text = (
+            f"🔔 *Новая заявка # {request_id}*\n\n"
+            f"👤 Пользователь: `{user_id}`\n"
+            f"📱 Телефон: {data['phone'] or '—'}\n"
+            f"📧 Email: {data['email'] or '—'}\n"
+            f"👤 ФИО: {data['fio'] or '—'}\n"
+            f"🆔 Username: {data['username'] or '—'}\n"
+            f"🌐 IP: {data['ip'] or '—'}\n"
+            f"🌍 Домен: {data['domain'] or '—'}"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
+            types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
+        )
+        bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=markup)
         bot.send_message(
-            message.chat.id,
-            f"👁️ *Глаз Исиды — OSINT*\n\n"
-            f"🕵️ Привет, {message.from_user.first_name}!\n"
-            f"⚡ Глубокий OSINT-поиск\n"
-            f"🛡️ 45+ источников\n"
-            f"🧅 Даркнет: Ahmia · Exonera · IntelX\n\n"
-            f"📊 *Осталось:* {remaining}/5\n\n"
-            f"📌 *Выбери действие:*",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
+            user_id,
+            "✅ *Заявка отправлена!*\n\n⏳ Ожидай решения администратора.",
+            parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Start error: {e}")
+        bot.send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hide_'))
+def approve_hide(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    request_id = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, phone, email, fio, username, ip, domain FROM hide_requests WHERE id = ?", (request_id,))
+        row = cur.fetchone()
+        if not row:
+            bot.send_message(ADMIN_ID, "❌ Заявка не найдена.")
+            return
+        user_id, phone, email, fio, username, ip, domain = row
+        cur.execute('''
+            INSERT OR REPLACE INTO hidden_data (user_id, phone, email, fio, username, ip, domain)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, phone, email, fio, username, ip, domain))
+        cur.execute("UPDATE hide_requests SET status = 'approved', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
+        conn.commit()
+        conn.close()
+        bot.send_message(
+            user_id,
+            "✅ *Ваша заявка на скрытие данных ОДОБРЕНА!*\n\n🔒 Ваши данные теперь скрыты от поиска.",
+            parse_mode="Markdown"
+        )
+        bot.send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reject_hide_'))
+def reject_hide(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    request_id = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM hide_requests WHERE id = ?", (request_id,))
+        row = cur.fetchone()
+        if row:
+            user_id = row[0]
+            cur.execute("UPDATE hide_requests SET status = 'rejected', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
+            conn.commit()
+            bot.send_message(
+                user_id,
+                "❌ *Ваша заявка на скрытие данных ОТКЛОНЕНА*\n\n📌 Попробуй отправить заявку ещё раз.",
+                parse_mode="Markdown"
+            )
+        conn.close()
+        bot.send_message(ADMIN_ID, f"❌ Заявка #{request_id} отклонена.")
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "list_hide_requests")
+def list_hide_requests(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, phone, email, fio, username, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            bot.send_message(ADMIN_ID, "📋 *Нет активных заявок.*", parse_mode="Markdown")
+            return
+        text = "📋 *Заявки на скрытие*\n\n"
+        for row in rows[:10]:
+            req_id, user_id, phone, email, fio, username, created = row
+            text += f"🔹 *#{req_id}* | @{username or 'нет'} | `{user_id}`\n"
+            text += f"   📱 {phone or '—'} | 📧 {email or '—'}\n"
+            text += f"   👤 {fio or '—'}\n"
+            text += f"   🕐 {created[:16]}\n\n"
+        markup = types.InlineKeyboardMarkup()
+        for row in rows[:5]:
+            req_id = row[0]
+            markup.add(
+                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
+                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
+            )
+        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
+        bot.send_message(ADMIN_ID, text, parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        bot.send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+# ==================== АДМИН-КОМАНДЫ ====================
+
+@bot.message_handler(commands=['adminhelp'])
+def admin_help_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
+    help_text = (
+        "👑 *Админ-команды Глаз Исиды*\n\n"
+        "📌 *Управление пользователями*\n"
+        "`/give <кол-во> <user_id>` — выдать запросы\n"
+        "`/take <кол-во> <user_id>` — забрать запросы\n"
+        "`/users` — список пользователей\n"
+        "`/hide <user_id>` — раскрыть скрытые данные\n\n"
+        "📌 *Управление ботом*\n"
+        "`/tech on/off` — техперерыв\n"
+        "`/stats` — статистика бота\n"
+        "`/broadcast <текст>` — рассылка\n\n"
+        "📌 *Скрытие данных*\n"
+        "`/requests` — список заявок на скрытие\n"
+        "`/hide <user_id>` — раскрыть данные\n\n"
+        "📌 *Поиск*\n"
+        "`/geoint <координаты/адрес>` — геоинт\n"
+        "`/metadata <ссылка на фото>` — метаданные\n"
+        "`/telegram <@username>` — поиск в Telegram\n\n"
+        "👁️ *Глаз Исиды — OSINT*\n"
+        "🛡️ @Arhapov"
+    )
+    bot.reply_to(message, help_text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['tech'])
+def tech_command(message):
+    global TECH_MODE
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❗ /tech on/off")
+        return
+    if args[1].lower() == "on":
+        TECH_MODE = True
+        bot.reply_to(message, "🔧 *Техперерыв ВКЛЮЧЁН*", parse_mode="Markdown")
+    elif args[1].lower() == "off":
+        TECH_MODE = False
+        bot.reply_to(message, "✅ *Техперерыв ВЫКЛЮЧЕН*", parse_mode="Markdown")
+    else:
+        bot.reply_to(message, "❗ /tech on или /tech off")
+
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        total_users = cur.fetchone()[0]
+        cur.execute("SELECT SUM(searches_today + searches_extra) FROM users")
+        total_searches = cur.fetchone()[0] or 0
+        cur.execute("SELECT COUNT(*) FROM hide_requests WHERE status = 'pending'")
+        pending_requests = cur.fetchone()[0] or 0
+        conn.close()
+        bot.reply_to(
+            message,
+            f"📊 *Статистика бота*\n\n"
+            f"👥 Всего пользователей: **{total_users}**\n"
+            f"🔍 Всего поисков: **{total_searches}**\n"
+            f"📋 Заявок на скрытие: **{pending_requests}**\n"
+            f"👑 Админ: @Arhapov",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
+    text = message.text.replace('/broadcast', '').strip()
+    if not text:
+        bot.reply_to(message, "❗ /broadcast <текст сообщения>")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users")
+        users = cur.fetchall()
+        conn.close()
+        sent = 0
+        for user in users:
+            try:
+                bot.send_message(user[0], f"📢 *Рассылка*\n\n{text}", parse_mode="Markdown")
+                sent += 1
+                time.sleep(0.05)
+            except:
+                continue
+        bot.reply_to(message, f"✅ Рассылка отправлена **{sent}** пользователям.", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+
+@bot.message_handler(commands=['requests'])
+def requests_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, phone, email, fio, username, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            bot.reply_to(message, "📋 *Нет активных заявок на скрытие данных.*", parse_mode="Markdown")
+            return
+        text = "📋 *Заявки на скрытие данных*\n\n"
+        for row in rows[:10]:
+            req_id, user_id, phone, email, fio, username, created = row
+            text += (
+                f"🔹 *#{req_id}* | @{username or 'нет'} | `{user_id}`\n"
+                f"   📱 {phone or '—'} | 📧 {email or '—'}\n"
+                f"   👤 {fio or '—'}\n"
+                f"   🕐 {created[:16]}\n\n"
+            )
+        markup = types.InlineKeyboardMarkup()
+        for row in rows[:5]:
+            req_id = row[0]
+            markup.add(
+                types.InlineKeyboardButton(f"✅ Одобрить #{req_id}", callback_data=f"approve_hide_{req_id}"),
+                types.InlineKeyboardButton(f"❌ Отклонить #{req_id}", callback_data=f"reject_hide_{req_id}")
+            )
+        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
+        bot.reply_to(message, text, parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+
+@bot.message_handler(commands=['hide'])
+def hide_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только для админа.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❗ /hide <user_id>")
+        return
+    target_id = int(args[1])
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM hidden_data WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        bot.reply_to(
+            message,
+            f"✅ Данные пользователя `{target_id}` раскрыты.\n\n🔓 Теперь его данные снова видны в поиске.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
 @bot.message_handler(commands=['give'])
 def give_command(message):
@@ -1714,6 +1848,266 @@ def users_command(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Ошибка: {e}")
 
+# ==================== МЕНЮ ====================
+
+def main_menu_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("👁️ ГЛОБАЛЬНЫЙ ПОИСК", callback_data="global_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📱 ТЕЛЕФОН", callback_data="phone_search"),
+        types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👤 USERNAME", callback_data="username_search"),
+        types.InlineKeyboardButton("🌐 IP/ДОМЕН", callback_data="domain_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🌍 ГЕОИНТ", callback_data="geoint_search"),
+        types.InlineKeyboardButton("🖼️ МЕТАДАННЫЕ", callback_data="metadata_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📱 TELEGRAM", callback_data="telegram_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🔒 СКРЫТЬ ДАННЫЕ", callback_data="hide_data"),
+        types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance"),
+        types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
+    )
+    return markup
+
+# ==================== ОБРАБОТЧИКИ ====================
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    try:
+        bot.answer_callback_query(call.id)
+        if call.data == "menu_back":
+            bot.edit_message_text(
+                "👁️ *Глаз Исиды — OSINT*\n\n🕵️ *Глубокий OSINT-поиск*\n45+ источников\n\n⚡ *Выбери действие:*",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=main_menu_keyboard()
+            )
+            return
+        if call.data == "menu_profile":
+            user = call.from_user
+            user_data = get_user(user.id, user.username or "Unknown")
+            remaining = get_remaining(user.id)
+            text = (
+                "👤 *Твой профиль*\n\n"
+                f"🆔 ID: `{user.id}`\n"
+                f"👤 Username: @{user.username or 'нет'}\n"
+                f"📛 Имя: {user.first_name or '—'}\n\n"
+                f"📊 Использовано: {user_data['searches_today']}/5\n"
+                f"📊 Бонусных: {user_data['searches_extra']}\n"
+                f"📊 Осталось: {remaining}\n"
+                f"⏰ Сброс: в 00:00 МСК\n"
+                f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
+            )
+            bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "menu_balance":
+            user_id = call.from_user.id
+            remaining = get_remaining(user_id)
+            used = get_user(user_id)["searches_today"]
+            extra = get_user(user_id)["searches_extra"]
+            text = (
+                "📊 *Твой баланс*\n\n"
+                f"🔍 Использовано: {used}/5\n"
+                f"📊 Бонусных: {extra}\n"
+                f"📊 Осталось: {remaining}\n"
+                f"⏰ Сброс: в 00:00 МСК\n"
+                f"👑 Админ: {'♾️ безлимитный' if user_id == ADMIN_ID else 'нет'}"
+            )
+            bot.edit_message_text(
+                text,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "menu_help":
+            bot.edit_message_text(
+                "❓ *Помощь*\n\n"
+                "📌 *Как пользоваться:*\n"
+                "• Отправь номер, email, никнейм, IP или домен\n\n"
+                "🧅 *Даркнет:* Ahmia · Exonera Tor · IntelX\n\n"
+                "📊 *Лимит:* 5 поисков в день\n"
+                "👑 *Админ:* безлимитный доступ\n"
+                "🔒 *Скрытие данных:* отправь заявку админу\n\n"
+                "🛡️ @Arhapov",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "global_search":
+            bot.edit_message_text(
+                "🌐 *ГЛОБАЛЬНЫЙ ПОИСК*\n\n"
+                "Отправь запрос для поиска:\n"
+                "• 📱 Номер: `+79991234567`\n"
+                "• 👤 ФИО: `Иванов Иван Иванович`\n"
+                "• 📧 Email: `user@example.com`\n"
+                "• 🆔 Никнейм: `username`\n"
+                "• 🌐 IP: `8.8.8.8`\n"
+                "• 🌍 Домен: `example.com`\n\n"
+                "⚡ *45+ OSINT-источников*\n"
+                "🧅 Даркнет: Ahmia · Exonera Tor · IntelX",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "phone_search":
+            bot.edit_message_text(
+                "📱 *ПРОВЕРКА ТЕЛЕФОНА*\n\n"
+                "Отправь номер для проверки.\n\n"
+                "Пример: `+79991234567`\n\n"
+                "🔍 ФИО · Адреса · Утечки · Соцсети",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "email_search":
+            bot.edit_message_text(
+                "📧 *ПРОВЕРКА EMAIL*\n\n"
+                "Отправь email для проверки.\n\n"
+                "Пример: `user@example.com`\n\n"
+                "🔍 Утечки · Репутация · Компания",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "username_search":
+            bot.edit_message_text(
+                "👤 *ПОИСК ПО USERNAME*\n\n"
+                "Отправь никнейм для поиска.\n\n"
+                "Пример: `username`\n\n"
+                "🔍 GitHub · Telegram · Соцсети · Утечки",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "domain_search":
+            bot.edit_message_text(
+                "🌐 *ПОИСК ПО IP/ДОМЕНУ*\n\n"
+                "Отправь IP или домен.\n\n"
+                "Пример IP: `8.8.8.8`\n"
+                "Пример домена: `example.com`\n\n"
+                "🔍 Геолокация · WHOIS · SSL · DNS · CMS",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "geoint_search":
+            bot.edit_message_text(
+                "🌍 *ГЕОИНТ*\n\n"
+                "Отправь координаты или адрес.\n\n"
+                "Пример координат: `55.7558,37.6173`\n"
+                "Пример адреса: `Москва, Кремль`",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "metadata_search":
+            bot.edit_message_text(
+                "🖼️ *МЕТАДАННЫЕ ФОТО*\n\n"
+                "Отправь ссылку на фото для извлечения EXIF-данных.\n\n"
+                "Пример: `https://example.com/photo.jpg`",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "telegram_search":
+            bot.edit_message_text(
+                "📱 *ПОИСК ПО TELEGRAM*\n\n"
+                "Отправь username Telegram аккаунта.\n\n"
+                "Пример: `@durov`",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                )
+            )
+            return
+        if call.data == "hide_data":
+            hide_data_callback(call)
+            return
+    except Exception as e:
+        logger.error(f"❌ Callback error: {e}")
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    try:
+        remaining = get_remaining(message.from_user.id)
+        bot.send_message(
+            message.chat.id,
+            f"👁️ *Глаз Исиды — OSINT*\n\n"
+            f"🕵️ Привет, {message.from_user.first_name}!\n"
+            f"⚡ Глубокий OSINT-поиск\n"
+            f"🛡️ 45+ источников\n"
+            f"🧅 Даркнет: Ahmia · Exonera · IntelX\n\n"
+            f"📊 *Осталось:* {remaining}/5\n\n"
+            f"📌 *Выбери действие:*",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Start error: {e}")
+
 # ==================== ОБРАБОТЧИК ТЕКСТА ====================
 
 @bot.message_handler(func=lambda message: True)
@@ -1721,6 +2115,10 @@ def handle_text(message):
     try:
         text = message.text.strip()
         if not text or text.startswith('/'):
+            return
+        
+        if TECH_MODE and message.from_user.id != ADMIN_ID:
+            bot.reply_to(message, "🔧 *Бот на техническом обслуживании*\n\n⏰ Вернёмся через несколько минут!", parse_mode="Markdown")
             return
         
         user_id = message.from_user.id
@@ -1749,8 +2147,7 @@ def handle_text(message):
                 )
             except asyncio.TimeoutError:
                 bot.edit_message_text(
-                    "⚠️ *Поиск прерван по таймауту (90 секунд)*\n\n"
-                    "📌 Показаны только быстрые результаты.",
+                    "⚠️ *Поиск прерван по таймауту (90 секунд)*\n\n📌 Показаны только быстрые результаты.",
                     chat_id,
                     msg.message_id,
                     parse_mode="Markdown"
@@ -1811,9 +2208,10 @@ if __name__ == "__main__":
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
     logger.info("🛡️ Канал: @Arhapov")
     logger.info("⚡ Таймаут поиска: 90 секунд")
-    logger.info("📊 45+ источников: ФИО · Адреса · Утечки · Соцсети")
+    logger.info("📊 45+ источников")
     logger.info("🧅 Даркнет: Ahmia · Exonera Tor · IntelX · WhatCMS")
-    logger.info("🔄 Обход блокировок: curl_cffi (Chrome имитация)")
+    logger.info("🔄 Обход блокировок: curl_cffi")
+    logger.info("🔒 Скрытие данных: бесплатно")
     logger.info("👁️ С поддержкой Архапова")
     
     try:

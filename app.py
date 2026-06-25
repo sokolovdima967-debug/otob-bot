@@ -83,32 +83,15 @@ def safe_edit_message(chat_id, message_id, text, parse_mode=None, reply_markup=N
             return None
         raise e
 
-def migrate_db():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("PRAGMA table_info(hide_requests)")
-        columns = [col[1] for col in cur.fetchall()]
-        if 'username' not in columns:
-            cur.execute("ALTER TABLE hide_requests ADD COLUMN username TEXT")
-            logger.info("✅ Добавлена колонка username в hide_requests")
-        if 'contact_phone' not in columns:
-            cur.execute("ALTER TABLE hide_requests ADD COLUMN contact_phone TEXT")
-            logger.info("✅ Добавлена колонка contact_phone в hide_requests")
-        cur.execute("PRAGMA table_info(hidden_data)")
-        columns = [col[1] for col in cur.fetchall()]
-        if 'username' not in columns:
-            cur.execute("ALTER TABLE hidden_data ADD COLUMN username TEXT")
-            logger.info("✅ Добавлена колонка username в hidden_data")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"❌ Ошибка миграции БД: {e}")
+# ==================== ФУНКЦИИ БАЗЫ ДАННЫХ ====================
 
 def init_db():
+    """Инициализация базы данных - создание всех таблиц"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
+        
+        # Таблица пользователей
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -118,6 +101,8 @@ def init_db():
                 last_reset DATE DEFAULT CURRENT_DATE
             )
         ''')
+        
+        # Таблица заявок на скрытие
         cur.execute('''
             CREATE TABLE IF NOT EXISTS hide_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +116,8 @@ def init_db():
                 reviewed_by INTEGER
             )
         ''')
+        
+        # Таблица скрытых данных
         cur.execute('''
             CREATE TABLE IF NOT EXISTS hidden_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,11 +128,49 @@ def init_db():
                 hidden_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована")
+        return True
     except Exception as e:
-        logger.error(f"❌ Ошибка БД: {e}")
+        logger.error(f"❌ Ошибка инициализации БД: {e}")
+        return False
+
+def migrate_db():
+    """Миграция базы данных - добавление новых колонок"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        
+        # Проверяем существование таблиц перед миграцией
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hide_requests'")
+        if cur.fetchone():
+            # Таблица существует, можно добавлять колонки
+            cur.execute("PRAGMA table_info(hide_requests)")
+            columns = [col[1] for col in cur.fetchall()]
+            if 'username' not in columns:
+                cur.execute("ALTER TABLE hide_requests ADD COLUMN username TEXT")
+                logger.info("✅ Добавлена колонка username в hide_requests")
+            if 'contact_phone' not in columns:
+                cur.execute("ALTER TABLE hide_requests ADD COLUMN contact_phone TEXT")
+                logger.info("✅ Добавлена колонка contact_phone в hide_requests")
+        
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hidden_data'")
+        if cur.fetchone():
+            cur.execute("PRAGMA table_info(hidden_data)")
+            columns = [col[1] for col in cur.fetchall()]
+            if 'username' not in columns:
+                cur.execute("ALTER TABLE hidden_data ADD COLUMN username TEXT")
+                logger.info("✅ Добавлена колонка username в hidden_data")
+        
+        conn.commit()
+        conn.close()
+        logger.info("✅ Миграция БД выполнена")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка миграции БД: {e}")
+        return False
 
 def get_user(user_id: int, username: str = None):
     try:
@@ -2157,8 +2182,12 @@ def start_command(message):
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
-    migrate_db()
+    # ===== ПРАВИЛЬНЫЙ ПОРЯДОК ИНИЦИАЛИЗАЦИИ =====
+    # 1. Сначала создаем таблицы
     init_db()
+    # 2. Потом добавляем новые колонки (миграция)
+    migrate_db()
+    
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
     logger.info("🛡️ Канал: @Arhapov")
     logger.info("⚡ Таймаут поиска: 120 секунд")

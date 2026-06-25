@@ -4,7 +4,7 @@ beautifulsoup4==4.12.2
 html5lib==1.1
 requests==2.31.0
 python-dotenv==1.0.0
-fake-useragent==1.4.0
+ent==1.4.0
 phonenumbers==8.13.0
 pytz==2024.1
 dnspython==2.6.1

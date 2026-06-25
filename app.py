@@ -52,7 +52,7 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== БЕЗОПАСНАЯ ОТПРАВКА СООБЩЕНИЙ ====================
+# ==================== БЕЗОПАСНЫЕ ФУНКЦИИ ОТПРАВКИ ====================
 
 def safe_send_message(chat_id, text, parse_mode="Markdown", reply_markup=None, max_length=4000):
     """Безопасная отправка сообщения с обрезкой и fallback"""
@@ -67,6 +67,21 @@ def safe_send_message(chat_id, text, parse_mode="Markdown", reply_markup=None, m
             return bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
         if "message is too long" in error_msg:
             return bot.send_message(chat_id, text[:2000] + "...\n\n⚠️ Сообщение обрезано", parse_mode=None, reply_markup=reply_markup)
+        raise e
+
+def safe_edit_message(chat_id, message_id, text, parse_mode="Markdown", reply_markup=None, max_length=4000):
+    """Безопасное редактирование сообщения с обрезкой и fallback"""
+    try:
+        if len(text) > max_length:
+            text = text[:max_length] + "...\n\n⚠️ Сообщение обрезано"
+        return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        error_msg = str(e)
+        if "can't parse" in error_msg or "parse" in error_msg:
+            logger.warning(f"Markdown error in edit, sending without formatting: {error_msg}")
+            return bot.edit_message_text(text, chat_id, message_id, parse_mode=None, reply_markup=reply_markup)
+        if "message is not modified" in error_msg:
+            return None
         raise e
 
 def init_db():
@@ -1370,14 +1385,13 @@ def hide_data_callback(call):
         types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
     )
     
-    bot.edit_message_text(
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
         "🔒 *Скрытие данных*\n\n"
         "📌 *Для подачи заявки нажми кнопку ниже и отправь свой контакт.*\n\n"
         "Это нужно для идентификации твоего аккаунта.\n\n"
         "После этого заполни данные для скрытия.",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
         reply_markup=markup
     )
 
@@ -1390,14 +1404,18 @@ def send_contact_hide(call):
     contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
     markup.add(contact_button)
     
-    bot.send_message(
+    safe_send_message(
         user_id,
         "📱 *Нажми кнопку ниже, чтобы отправить свой контакт.*\n\n"
         "Это нужно для подтверждения твоей личности.",
-        parse_mode="Markdown",
         reply_markup=markup
     )
     user_state[user_id] = "awaiting_contact_for_hide"
+    
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
 
 @bot.message_handler(content_types=['contact'])
 def handle_contact(message):
@@ -1416,7 +1434,7 @@ def handle_contact(message):
         }
         
         markup = types.ReplyKeyboardRemove()
-        bot.send_message(
+        safe_send_message(
             user_id,
             "✅ *Контакт получен!*\n\n"
             "📝 Теперь отправь данные для скрытия в формате:\n\n"
@@ -1427,7 +1445,6 @@ def handle_contact(message):
             "`IP: 8.8.8.8`\n"
             "`ДОМЕН: example.com`\n\n"
             "📌 Можно отправить не все поля, только то, что хочешь скрыть.",
-            parse_mode="Markdown",
             reply_markup=markup
         )
         user_state[user_id] = "awaiting_hide_data_fields"
@@ -1895,14 +1912,13 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
         
         if call.data == "menu_back":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "👁️ *Глаз Исиды — OSINT*\n\n"
                 "🕵️ *Глубокий OSINT-поиск*\n"
                 "45+ источников\n\n"
                 "⚡ *Выбери действие:*",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=main_menu_keyboard()
             )
             return
@@ -1922,11 +1938,10 @@ def callback_handler(call):
                 f"⏰ Сброс: в 00:00 МСК\n"
                 f"👑 Админ: {'✅' if user.id == ADMIN_ID else '❌'}"
             )
-            bot.edit_message_text(
-                text,
+            safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                parse_mode="Markdown",
+                text,
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -1946,11 +1961,10 @@ def callback_handler(call):
                 f"⏰ Сброс: в 00:00 МСК\n"
                 f"👑 Админ: {'♾️ безлимитный' if user_id == ADMIN_ID else 'нет'}"
             )
-            bot.edit_message_text(
-                text,
+            safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                parse_mode="Markdown",
+                text,
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -1958,7 +1972,9 @@ def callback_handler(call):
             return
         
         if call.data == "menu_help":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "❓ *Помощь*\n\n"
                 "📌 *Как пользоваться:*\n"
                 "• Отправь номер, email, никнейм, IP или домен\n\n"
@@ -1967,9 +1983,6 @@ def callback_handler(call):
                 "👑 *Админ:* безлимитный доступ\n"
                 "🔒 *Скрытие данных:* отправь заявку админу\n\n"
                 "🛡️ @Arhapov",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -1977,7 +1990,9 @@ def callback_handler(call):
             return
         
         if call.data == "global_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "🌐 *ГЛОБАЛЬНЫЙ ПОИСК*\n\n"
                 "Отправь запрос для поиска:\n"
                 "• 📱 Номер: `+79991234567`\n"
@@ -1988,9 +2003,6 @@ def callback_handler(call):
                 "• 🌍 Домен: `example.com`\n\n"
                 "⚡ *45+ OSINT-источников*\n"
                 "🧅 Даркнет: Ahmia · Exonera Tor · IntelX",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -1998,14 +2010,13 @@ def callback_handler(call):
             return
         
         if call.data == "phone_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "📱 *ПРОВЕРКА ТЕЛЕФОНА*\n\n"
                 "Отправь номер для проверки.\n\n"
                 "Пример: `+79991234567`\n\n"
                 "🔍 ФИО · Адреса · Утечки · Соцсети",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2013,14 +2024,13 @@ def callback_handler(call):
             return
         
         if call.data == "email_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "📧 *ПРОВЕРКА EMAIL*\n\n"
                 "Отправь email для проверки.\n\n"
                 "Пример: `user@example.com`\n\n"
                 "🔍 Утечки · Репутация · Компания",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2028,14 +2038,13 @@ def callback_handler(call):
             return
         
         if call.data == "username_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "👤 *ПОИСК ПО USERNAME*\n\n"
                 "Отправь никнейм для поиска.\n\n"
                 "Пример: `username`\n\n"
                 "🔍 GitHub · Telegram · Соцсети · Утечки",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2043,15 +2052,14 @@ def callback_handler(call):
             return
         
         if call.data == "domain_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "🌐 *ПОИСК ПО IP/ДОМЕНУ*\n\n"
                 "Отправь IP или домен.\n\n"
                 "Пример IP: `8.8.8.8`\n"
                 "Пример домена: `example.com`\n\n"
                 "🔍 Геолокация · WHOIS · SSL · DNS · CMS",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2059,14 +2067,13 @@ def callback_handler(call):
             return
         
         if call.data == "geoint_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "🌍 *ГЕОИНТ*\n\n"
                 "Отправь координаты или адрес.\n\n"
                 "Пример координат: `55.7558,37.6173`\n"
                 "Пример адреса: `Москва, Кремль`",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2074,13 +2081,12 @@ def callback_handler(call):
             return
         
         if call.data == "metadata_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "🖼️ *МЕТАДАННЫЕ ФОТО*\n\n"
                 "Отправь ссылку на фото для извлечения EXIF-данных.\n\n"
                 "Пример: `https://example.com/photo.jpg`",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2088,13 +2094,12 @@ def callback_handler(call):
             return
         
         if call.data == "telegram_search":
-            bot.edit_message_text(
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
                 "📱 *ПОИСК ПО TELEGRAM*\n\n"
                 "Отправь username Telegram аккаунта.\n\n"
                 "Пример: `@durov`",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2114,7 +2119,7 @@ def callback_handler(call):
 def start_command(message):
     try:
         remaining = get_remaining(message.from_user.id)
-        bot.send_message(
+        safe_send_message(
             message.chat.id,
             f"👁️ *Глаз Исиды — OSINT*\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
@@ -2123,7 +2128,6 @@ def start_command(message):
             f"🧅 Даркнет: Ahmia · Exonera · IntelX\n\n"
             f"📊 *Осталось:* {remaining}/5\n\n"
             f"📌 *Выбери действие:*",
-            parse_mode="Markdown",
             reply_markup=main_menu_keyboard()
         )
     except Exception as e:
@@ -2183,22 +2187,21 @@ def handle_text(message):
                     asyncio.wait_for(global_lookup(text), timeout=120)
                 )
             except asyncio.TimeoutError:
-                bot.edit_message_text(
-                    "⚠️ *Поиск прерван по таймауту (120 секунд)*\n\n"
-                    "📌 Показаны только быстрые результаты.",
+                safe_edit_message(
                     chat_id,
                     msg.message_id,
-                    parse_mode="Markdown"
+                    "⚠️ *Поиск прерван по таймауту (120 секунд)*\n\n"
+                    "📌 Показаны только быстрые результаты."
                 )
                 data = {"query": text, "type": "unknown", "sources": {}, "total_results": 0}
             finally:
                 loop.close()
         except Exception as e:
             logger.error(f"❌ Ошибка выполнения поиска: {e}")
-            bot.edit_message_text(
-                f"⚠️ Ошибка: {str(e)[:100]}",
+            safe_edit_message(
                 chat_id,
-                msg.message_id
+                msg.message_id,
+                f"⚠️ Ошибка: {str(e)[:100]}"
             )
             return
         
@@ -2236,7 +2239,10 @@ def handle_text(message):
             )
         
         os.remove(filename)
-        bot.delete_message(chat_id, msg.message_id)
+        try:
+            bot.delete_message(chat_id, msg.message_id)
+        except:
+            pass
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")

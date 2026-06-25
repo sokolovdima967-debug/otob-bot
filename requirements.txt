@@ -11,3 +11,4 @@ dnspython==2.6.1
 Brotli==1.1.0
 curl-cffi==0.8.0b6
 Pillow==10.4.0
+ent==1.4.0

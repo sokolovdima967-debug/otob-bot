@@ -53,6 +53,9 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+bot = telebot.TeleBot(TOKEN, parse_mode=None)
+bot.remove_webhook()
+
 # ==================== БЕЗОПАСНЫЕ ФУНКЦИИ ОТПРАВКИ ====================
 
 def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None, max_length=4000):
@@ -91,7 +94,6 @@ def init_db():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
-        # Таблица пользователей
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -102,7 +104,6 @@ def init_db():
             )
         ''')
         
-        # Таблица заявок на скрытие
         cur.execute('''
             CREATE TABLE IF NOT EXISTS hide_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,7 +118,6 @@ def init_db():
             )
         ''')
         
-        # Таблица скрытых данных
         cur.execute('''
             CREATE TABLE IF NOT EXISTS hidden_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,10 +143,8 @@ def migrate_db():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         
-        # Проверяем существование таблиц перед миграцией
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hide_requests'")
         if cur.fetchone():
-            # Таблица существует, можно добавлять колонки
             cur.execute("PRAGMA table_info(hide_requests)")
             columns = [col[1] for col in cur.fetchall()]
             if 'username' not in columns:
@@ -250,9 +248,6 @@ def get_remaining(user_id: int) -> int:
         return 0
 
 reports = {}
-
-bot = telebot.TeleBot(TOKEN, parse_mode=None)
-bot.remove_webhook()
 
 class ReportHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -1098,494 +1093,11 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 """
     return html
 
-# ==================== СКРЫТИЕ ДАННЫХ ====================
-
-@bot.callback_query_handler(func=lambda call: call.data == "hide_data")
-def hide_data_callback(call):
-    user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
-    
-    user_data = get_user_data(user_id)
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("📱 Отправить контакт", callback_data="send_contact_hide"),
-        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-    )
-    
-    safe_edit_message(
-        call.message.chat.id,
-        call.message.message_id,
-        f"🔒 Скрытие данных\n\n"
-        f"👤 Твой аккаунт:\n"
-        f"🆔 ID: {user_id}\n"
-        f"👤 Username: @{user_data['username']}\n"
-        f"📛 Имя: {user_data['first_name']}\n\n"
-        f"📌 Нажми кнопку ниже и отправь свой контакт.\n"
-        f"Это нужно для получения номера телефона.\n\n"
-        f"📝 После этого введи только ФИО для скрытия.",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "send_contact_hide")
-def send_contact_hide(call):
-    user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
-    
-    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True, one_time_keyboard=True)
-    contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
-    markup.add(contact_button)
-    
-    safe_send_message(
-        user_id,
-        "📱 Нажми кнопку ниже, чтобы отправить свой контакт.\n\n"
-        "Это нужно для подтверждения твоей личности.",
-        reply_markup=markup
-    )
-    user_state[user_id] = "awaiting_contact_for_hide"
-    
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except:
-        pass
-
-@bot.message_handler(content_types=['contact'])
-def handle_contact(message):
-    user_id = message.from_user.id
-    
-    if user_state.get(user_id) == "awaiting_contact_for_hide":
-        contact = message.contact
-        user_state.pop(user_id, None)
-        
-        username = message.from_user.username
-        if not username:
-            username = "нет"
-        
-        user_state[f"hide_contact_{user_id}"] = {
-            "phone": contact.phone_number,
-            "user_id": contact.user_id,
-            "first_name": contact.first_name,
-            "last_name": contact.last_name,
-            "username": username
-        }
-        
-        markup = types.ReplyKeyboardRemove()
-        user_data = get_user_data(user_id)
-        
-        safe_send_message(
-            user_id,
-            f"✅ Контакт получен!\n\n"
-            f"📱 Номер: {contact.phone_number}\n"
-            f"👤 Username: @{username}\n"
-            f"🆔 ID: {user_id}\n\n"
-            f"📝 Теперь отправь ФИО для скрытия:\n\n"
-            f"Пример: Иванов Иван Иванович",
-            reply_markup=markup
-        )
-        user_state[user_id] = "awaiting_hide_fio"
-
-@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_fio")
-def process_hide_fio(message):
-    user_id = message.from_user.id
-    fio = message.text.strip()
-    user_state.pop(user_id, None)
-    
-    if not re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', fio):
-        safe_send_message(
-            user_id,
-            "❌ Некорректное ФИО\n\n"
-            "Формат должен быть: Иванов Иван Иванович\n"
-            "Попробуй ещё раз."
-        )
-        user_state[user_id] = "awaiting_hide_fio"
-        return
-    
-    contact = user_state.get(f"hide_contact_{user_id}", {})
-    
-    username = message.from_user.username
-    if not username:
-        username = "нет"
-    
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            INSERT INTO hide_requests (
-                user_id, username, contact_phone, phone, fio, status
-            ) VALUES (?, ?, ?, ?, ?, 'pending')
-        ''', (
-            user_id,
-            username,
-            contact.get('phone') or '—',
-            contact.get('phone') or '—',
-            fio
-        ))
-        request_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-        
-        admin_text = (
-            f"🔔 Новая заявка на скрытие данных # {request_id}\n\n"
-            f"👤 Пользователь: @{username} | {user_id}\n"
-            f"📱 Контактный телефон: {contact.get('phone') or '—'}\n"
-            f"👤 ФИО для скрытия: {fio}"
-        )
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
-            types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
-        )
-        safe_send_message(ADMIN_ID, admin_text, reply_markup=markup)
-        
-        safe_send_message(
-            user_id,
-            f"✅ Заявка отправлена!\n\n"
-            f"📋 ФИО для скрытия: {fio}\n"
-            f"📱 Телефон: {contact.get('phone') or '—'}\n"
-            f"👤 Username: @{username}\n"
-            f"🆔 ID: {user_id}\n\n"
-            f"⏳ Ожидай решения администратора."
-        )
-    except Exception as e:
-        safe_send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hide_'))
-def approve_hide(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
-        return
-    
-    request_id = int(call.data.split('_')[2])
-    bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
-    
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            SELECT user_id, username, phone, fio FROM hide_requests WHERE id = ?
-        ''', (request_id,))
-        row = cur.fetchone()
-        if not row:
-            safe_send_message(ADMIN_ID, "❌ Заявка не найдена.")
-            return
-        
-        user_id, username, phone, fio = row
-        
-        cur.execute('''
-            INSERT OR REPLACE INTO hidden_data (user_id, username, phone, fio)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, username, phone, fio))
-        
-        cur.execute("UPDATE hide_requests SET status = 'approved', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
-        conn.commit()
-        conn.close()
-        
-        safe_send_message(
-            user_id,
-            f"✅ Ваша заявка на скрытие данных ОДОБРЕНА!\n\n"
-            f"🔒 Теперь эти данные скрыты от поиска:\n"
-            f"📱 Телефон: {phone or '—'}\n"
-            f"👤 ФИО: {fio}\n"
-            f"👤 Username: @{username}\n"
-            f"🆔 ID: {user_id}"
-        )
-        safe_send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
-    except Exception as e:
-        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('reject_hide_'))
-def reject_hide(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
-        return
-    
-    request_id = int(call.data.split('_')[2])
-    bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
-    
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM hide_requests WHERE id = ?", (request_id,))
-        row = cur.fetchone()
-        if row:
-            user_id = row[0]
-            cur.execute("UPDATE hide_requests SET status = 'rejected', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
-            conn.commit()
-            safe_send_message(
-                user_id,
-                "❌ Ваша заявка на скрытие данных ОТКЛОНЕНА\n\n"
-                "📌 Возможно, данные не соответствуют требованиям.\n"
-                "🔄 Попробуй отправить заявку ещё раз с корректными данными."
-            )
-        conn.close()
-        safe_send_message(ADMIN_ID, f"❌ Заявка #{request_id} отклонена.")
-    except Exception as e:
-        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
-
-@bot.callback_query_handler(func=lambda call: call.data == "list_hide_requests")
-def list_hide_requests(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
-        return
-    
-    bot.answer_callback_query(call.id)
-    
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
-        rows = cur.fetchall()
-        conn.close()
-        
-        if not rows:
-            safe_send_message(ADMIN_ID, "📋 Нет активных заявок.")
-            return
-        
-        text = "📋 Заявки на скрытие данных\n\n"
-        for row in rows[:10]:
-            req_id, user_id, username, phone, fio, created = row
-            text += (
-                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
-                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
-                f"   🕐 {created[:16]}\n\n"
-            )
-        
-        markup = types.InlineKeyboardMarkup()
-        for row in rows[:5]:
-            req_id = row[0]
-            markup.add(
-                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
-                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
-            )
-        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
-        
-        safe_send_message(ADMIN_ID, text, reply_markup=markup)
-    except Exception as e:
-        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
-
-# ==================== АДМИН-КОМАНДЫ ====================
-
-@bot.message_handler(commands=['adminhelp'])
-def admin_help_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    
-    help_text = (
-        "👑 Админ-команды Глаз Исиды\n\n"
-        "📌 Управление пользователями\n"
-        "/give <кол-во> <user_id> — выдать запросы\n"
-        "/take <кол-во> <user_id> — забрать запросы\n"
-        "/users — список пользователей\n"
-        "/hide <user_id> — раскрыть скрытые данные\n\n"
-        "📌 Управление ботом\n"
-        "/tech on/off — техперерыв\n"
-        "/stats — статистика бота\n"
-        "/broadcast <текст> — рассылка\n\n"
-        "📌 Скрытие данных\n"
-        "/requests — список заявок на скрытие\n"
-        "/hide <user_id> — раскрыть данные\n\n"
-        "👁️ Глаз Исиды — OSINT\n"
-        "🛡️ @Arhapov"
-    )
-    safe_send_message(message.chat.id, help_text)
-
-@bot.message_handler(commands=['tech'])
-def tech_command(message):
-    global TECH_MODE
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    args = message.text.split()
-    if len(args) < 2:
-        safe_send_message(message.chat.id, "❗ /tech on/off")
-        return
-    if args[1].lower() == "on":
-        TECH_MODE = True
-        safe_send_message(message.chat.id, "🔧 Техперерыв ВКЛЮЧЁН")
-    elif args[1].lower() == "off":
-        TECH_MODE = False
-        safe_send_message(message.chat.id, "✅ Техперерыв ВЫКЛЮЧЕН")
-    else:
-        safe_send_message(message.chat.id, "❗ /tech on или /tech off")
-
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM users")
-        total_users = cur.fetchone()[0]
-        cur.execute("SELECT SUM(searches_today + searches_extra) FROM users")
-        total_searches = cur.fetchone()[0] or 0
-        cur.execute("SELECT COUNT(*) FROM hide_requests WHERE status = 'pending'")
-        pending_requests = cur.fetchone()[0] or 0
-        conn.close()
-        safe_send_message(
-            message.chat.id,
-            f"📊 Статистика бота\n\n"
-            f"👥 Всего пользователей: {total_users}\n"
-            f"🔍 Всего поисков: {total_searches}\n"
-            f"📋 Заявок на скрытие: {pending_requests}\n"
-            f"👑 Админ: @Arhapov"
-        )
-    except Exception as e:
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    text = message.text.replace('/broadcast', '').strip()
-    if not text:
-        safe_send_message(message.chat.id, "❗ /broadcast <текст сообщения>")
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users")
-        users = cur.fetchall()
-        conn.close()
-        sent = 0
-        for user in users:
-            try:
-                safe_send_message(user[0], f"📢 Рассылка\n\n{text}")
-                sent += 1
-                time.sleep(0.05)
-            except:
-                continue
-        safe_send_message(message.chat.id, f"✅ Рассылка отправлена {sent} пользователям.")
-    except Exception as e:
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-@bot.message_handler(commands=['requests'])
-def requests_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
-        rows = cur.fetchall()
-        conn.close()
-        if not rows:
-            safe_send_message(message.chat.id, "📋 Нет активных заявок.")
-            return
-        text = "📋 Заявки на скрытие данных\n\n"
-        for row in rows[:10]:
-            req_id, user_id, username, phone, fio, created = row
-            text += (
-                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
-                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
-                f"   🕐 {created[:16]}\n\n"
-            )
-        markup = types.InlineKeyboardMarkup()
-        for row in rows[:5]:
-            req_id = row[0]
-            markup.add(
-                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
-                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
-            )
-        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
-        safe_send_message(message.chat.id, text, reply_markup=markup)
-    except Exception as e:
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-@bot.message_handler(commands=['hide'])
-def hide_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    args = message.text.split()
-    if len(args) < 2:
-        safe_send_message(message.chat.id, "❗ /hide <user_id>")
-        return
-    target_id = int(args[1])
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM hidden_data WHERE user_id = ?", (target_id,))
-        conn.commit()
-        conn.close()
-        safe_send_message(
-            message.chat.id,
-            f"✅ Данные пользователя {target_id} раскрыты.\n\n🔓 Теперь его данные снова видны в поиске."
-        )
-    except Exception as e:
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-@bot.message_handler(commands=['give'])
-def give_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    try:
-        args = message.text.split()
-        if len(args) < 3:
-            safe_send_message(message.chat.id, "❗ /give <кол-во> <user_id>")
-            return
-        amount = int(args[1])
-        target_id = int(args[2])
-        user = get_user(target_id)
-        user["searches_today"] = max(0, user["searches_today"] - amount)
-        update_user(target_id, user)
-        safe_send_message(message.chat.id, f"✅ Выдано {amount} запросов пользователю {target_id}.")
-    except:
-        safe_send_message(message.chat.id, "⚠️ Ошибка. /give <кол-во> <user_id>")
-
-@bot.message_handler(commands=['take'])
-def take_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    try:
-        args = message.text.split()
-        if len(args) < 3:
-            safe_send_message(message.chat.id, "❗ /take <кол-во> <user_id>")
-            return
-        amount = int(args[1])
-        target_id = int(args[2])
-        user = get_user(target_id)
-        user["searches_extra"] = max(0, user["searches_extra"] - amount)
-        update_user(target_id, user)
-        safe_send_message(message.chat.id, f"✅ Забрано {amount} запросов у пользователя {target_id}.")
-    except:
-        safe_send_message(message.chat.id, "⚠️ Ошибка. /take <кол-во> <user_id>")
-
-@bot.message_handler(commands=['users'])
-def users_command(message):
-    if message.from_user.id != ADMIN_ID:
-        safe_send_message(message.chat.id, "❌ Только для админа.")
-        return
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id, username, searches_today, searches_extra FROM users ORDER BY searches_today DESC")
-        rows = cur.fetchall()
-        conn.close()
-        if not rows:
-            safe_send_message(message.chat.id, "📊 Нет пользователей.")
-            return
-        text = "📊 Список пользователей\n\n"
-        for user_id, username, today, extra in rows[:20]:
-            total = (5 - today) + extra
-            text += f"• {user_id} — @{username or 'нет'} | запросов: {total}\n"
-        safe_send_message(message.chat.id, text)
-    except Exception as e:
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
 # ==================== ФУНКЦИЯ ВЫПОЛНЕНИЯ ПОИСКА ====================
 
 def run_search_sync(chat_id, user_id, query, mode):
     """Синхронный запуск поиска (для callback)"""
     try:
-        # Создаём новый event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -1818,12 +1330,597 @@ async def run_username_search(chat_id, user_id, query):
     except:
         pass
 
-# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК КОЛБЭКОВ ====================
+# ==================== МЕНЮ ====================
+
+def main_menu_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("👁️ ГЛОБАЛЬНЫЙ ПОИСК", callback_data="global_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📱 ТЕЛЕФОН", callback_data="phone_search"),
+        types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👤 USERNAME", callback_data="username_search"),
+        types.InlineKeyboardButton("🌐 IP/ДОМЕН", callback_data="domain_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🌍 ГЕОИНТ", callback_data="geoint_search"),
+        types.InlineKeyboardButton("🖼️ МЕТАДАННЫЕ", callback_data="metadata_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📱 TELEGRAM", callback_data="telegram_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🔒 СКРЫТЬ ДАННЫЕ", callback_data="hide_data"),
+        types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance"),
+        types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
+    )
+    return markup
+
+# ==================== ОБРАБОТЧИКИ КОМАНД (должны быть ЗАРЕГИСТРИРОВАНЫ ПЕРВЫМИ) ====================
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    try:
+        logger.info(f"Start command from {message.from_user.id}")
+        remaining = get_remaining(message.from_user.id)
+        user_id = message.from_user.id
+        user_state.pop(user_id, None)
+        user_state.pop(f"search_query_{user_id}", None)
+        user_search_mode.pop(user_id, None)
+        
+        safe_send_message(
+            message.chat.id,
+            f"👁️ Глаз Исиды — OSINT\n\n"
+            f"🕵️ Привет, {message.from_user.first_name}!\n"
+            f"⚡ Глубокий OSINT-поиск\n"
+            f"🛡️ Множество источников\n\n"
+            f"📊 Осталось: {remaining}/5\n\n"
+            f"📌 Выбери действие:",
+            reply_markup=main_menu_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Start error: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['adminhelp'])
+def admin_help_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    
+    help_text = (
+        "👑 Админ-команды Глаз Исиды\n\n"
+        "📌 Управление пользователями\n"
+        "/give <кол-во> <user_id> — выдать запросы\n"
+        "/take <кол-во> <user_id> — забрать запросы\n"
+        "/users — список пользователей\n"
+        "/hide <user_id> — раскрыть скрытые данные\n\n"
+        "📌 Управление ботом\n"
+        "/tech on/off — техперерыв\n"
+        "/stats — статистика бота\n"
+        "/broadcast <текст> — рассылка\n\n"
+        "📌 Скрытие данных\n"
+        "/requests — список заявок на скрытие\n"
+        "/hide <user_id> — раскрыть данные\n\n"
+        "👁️ Глаз Исиды — OSINT\n"
+        "🛡️ @Arhapov"
+    )
+    safe_send_message(message.chat.id, help_text)
+
+@bot.message_handler(commands=['tech'])
+def tech_command(message):
+    global TECH_MODE
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        safe_send_message(message.chat.id, "❗ /tech on/off")
+        return
+    if args[1].lower() == "on":
+        TECH_MODE = True
+        safe_send_message(message.chat.id, "🔧 Техперерыв ВКЛЮЧЁН")
+    elif args[1].lower() == "off":
+        TECH_MODE = False
+        safe_send_message(message.chat.id, "✅ Техперерыв ВЫКЛЮЧЕН")
+    else:
+        safe_send_message(message.chat.id, "❗ /tech on или /tech off")
+
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        total_users = cur.fetchone()[0]
+        cur.execute("SELECT SUM(searches_today + searches_extra) FROM users")
+        total_searches = cur.fetchone()[0] or 0
+        cur.execute("SELECT COUNT(*) FROM hide_requests WHERE status = 'pending'")
+        pending_requests = cur.fetchone()[0] or 0
+        conn.close()
+        safe_send_message(
+            message.chat.id,
+            f"📊 Статистика бота\n\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"🔍 Всего поисков: {total_searches}\n"
+            f"📋 Заявок на скрытие: {pending_requests}\n"
+            f"👑 Админ: @Arhapov"
+        )
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    text = message.text.replace('/broadcast', '').strip()
+    if not text:
+        safe_send_message(message.chat.id, "❗ /broadcast <текст сообщения>")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users")
+        users = cur.fetchall()
+        conn.close()
+        sent = 0
+        for user in users:
+            try:
+                safe_send_message(user[0], f"📢 Рассылка\n\n{text}")
+                sent += 1
+                time.sleep(0.05)
+            except:
+                continue
+        safe_send_message(message.chat.id, f"✅ Рассылка отправлена {sent} пользователям.")
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['requests'])
+def requests_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            safe_send_message(message.chat.id, "📋 Нет активных заявок.")
+            return
+        text = "📋 Заявки на скрытие данных\n\n"
+        for row in rows[:10]:
+            req_id, user_id, username, phone, fio, created = row
+            text += (
+                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
+                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
+                f"   🕐 {created[:16]}\n\n"
+            )
+        markup = types.InlineKeyboardMarkup()
+        for row in rows[:5]:
+            req_id = row[0]
+            markup.add(
+                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
+                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
+            )
+        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
+        safe_send_message(message.chat.id, text, reply_markup=markup)
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['hide'])
+def hide_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        safe_send_message(message.chat.id, "❗ /hide <user_id>")
+        return
+    target_id = int(args[1])
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM hidden_data WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        safe_send_message(
+            message.chat.id,
+            f"✅ Данные пользователя {target_id} раскрыты.\n\n🔓 Теперь его данные снова видны в поиске."
+        )
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['give'])
+def give_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            safe_send_message(message.chat.id, "❗ /give <кол-во> <user_id>")
+            return
+        amount = int(args[1])
+        target_id = int(args[2])
+        user = get_user(target_id)
+        user["searches_today"] = max(0, user["searches_today"] - amount)
+        update_user(target_id, user)
+        safe_send_message(message.chat.id, f"✅ Выдано {amount} запросов пользователю {target_id}.")
+    except:
+        safe_send_message(message.chat.id, "⚠️ Ошибка. /give <кол-во> <user_id>")
+
+@bot.message_handler(commands=['take'])
+def take_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            safe_send_message(message.chat.id, "❗ /take <кол-во> <user_id>")
+            return
+        amount = int(args[1])
+        target_id = int(args[2])
+        user = get_user(target_id)
+        user["searches_extra"] = max(0, user["searches_extra"] - amount)
+        update_user(target_id, user)
+        safe_send_message(message.chat.id, f"✅ Забрано {amount} запросов у пользователя {target_id}.")
+    except:
+        safe_send_message(message.chat.id, "⚠️ Ошибка. /take <кол-во> <user_id>")
+
+@bot.message_handler(commands=['users'])
+def users_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, username, searches_today, searches_extra FROM users ORDER BY searches_today DESC")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            safe_send_message(message.chat.id, "📊 Нет пользователей.")
+            return
+        text = "📊 Список пользователей\n\n"
+        for user_id, username, today, extra in rows[:20]:
+            total = (5 - today) + extra
+            text += f"• {user_id} — @{username or 'нет'} | запросов: {total}\n"
+        safe_send_message(message.chat.id, text)
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+# ==================== ОБРАБОТЧИКИ КОНТАКТОВ ====================
+
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    user_id = message.from_user.id
+    
+    if user_state.get(user_id) == "awaiting_contact_for_hide":
+        contact = message.contact
+        user_state.pop(user_id, None)
+        
+        username = message.from_user.username
+        if not username:
+            username = "нет"
+        
+        user_state[f"hide_contact_{user_id}"] = {
+            "phone": contact.phone_number,
+            "user_id": contact.user_id,
+            "first_name": contact.first_name,
+            "last_name": contact.last_name,
+            "username": username
+        }
+        
+        markup = types.ReplyKeyboardRemove()
+        user_data = get_user_data(user_id)
+        
+        safe_send_message(
+            user_id,
+            f"✅ Контакт получен!\n\n"
+            f"📱 Номер: {contact.phone_number}\n"
+            f"👤 Username: @{username}\n"
+            f"🆔 ID: {user_id}\n\n"
+            f"📝 Теперь отправь ФИО для скрытия:\n\n"
+            f"Пример: Иванов Иван Иванович",
+            reply_markup=markup
+        )
+        user_state[user_id] = "awaiting_hide_fio"
+
+# ==================== ОБРАБОТЧИКИ СОСТОЯНИЙ ====================
+
+@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_fio")
+def process_hide_fio(message):
+    user_id = message.from_user.id
+    fio = message.text.strip()
+    user_state.pop(user_id, None)
+    
+    if not re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', fio):
+        safe_send_message(
+            user_id,
+            "❌ Некорректное ФИО\n\n"
+            "Формат должен быть: Иванов Иван Иванович\n"
+            "Попробуй ещё раз."
+        )
+        user_state[user_id] = "awaiting_hide_fio"
+        return
+    
+    contact = user_state.get(f"hide_contact_{user_id}", {})
+    
+    username = message.from_user.username
+    if not username:
+        username = "нет"
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO hide_requests (
+                user_id, username, contact_phone, phone, fio, status
+            ) VALUES (?, ?, ?, ?, ?, 'pending')
+        ''', (
+            user_id,
+            username,
+            contact.get('phone') or '—',
+            contact.get('phone') or '—',
+            fio
+        ))
+        request_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        
+        admin_text = (
+            f"🔔 Новая заявка на скрытие данных # {request_id}\n\n"
+            f"👤 Пользователь: @{username} | {user_id}\n"
+            f"📱 Контактный телефон: {contact.get('phone') or '—'}\n"
+            f"👤 ФИО для скрытия: {fio}"
+        )
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
+            types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
+        )
+        safe_send_message(ADMIN_ID, admin_text, reply_markup=markup)
+        
+        safe_send_message(
+            user_id,
+            f"✅ Заявка отправлена!\n\n"
+            f"📋 ФИО для скрытия: {fio}\n"
+            f"📱 Телефон: {contact.get('phone') or '—'}\n"
+            f"👤 Username: @{username}\n"
+            f"🆔 ID: {user_id}\n\n"
+            f"⏳ Ожидай решения администратора."
+        )
+    except Exception as e:
+        safe_send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+# ==================== ОБРАБОТЧИКИ CALLBACK (после команд и текста) ====================
+
+@bot.callback_query_handler(func=lambda call: call.data == "hide_data")
+def hide_data_callback(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    
+    user_data = get_user_data(user_id)
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📱 Отправить контакт", callback_data="send_contact_hide"),
+        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+    )
+    
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"🔒 Скрытие данных\n\n"
+        f"👤 Твой аккаунт:\n"
+        f"🆔 ID: {user_id}\n"
+        f"👤 Username: @{user_data['username']}\n"
+        f"📛 Имя: {user_data['first_name']}\n\n"
+        f"📌 Нажми кнопку ниже и отправь свой контакт.\n"
+        f"Это нужно для получения номера телефона.\n\n"
+        f"📝 После этого введи только ФИО для скрытия.",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "send_contact_hide")
+def send_contact_hide(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    
+    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True, one_time_keyboard=True)
+    contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
+    markup.add(contact_button)
+    
+    safe_send_message(
+        user_id,
+        "📱 Нажми кнопку ниже, чтобы отправить свой контакт.\n\n"
+        "Это нужно для подтверждения твоей личности.",
+        reply_markup=markup
+    )
+    user_state[user_id] = "awaiting_contact_for_hide"
+    
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hide_'))
+def approve_hide(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    
+    request_id = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT user_id, username, phone, fio FROM hide_requests WHERE id = ?
+        ''', (request_id,))
+        row = cur.fetchone()
+        if not row:
+            safe_send_message(ADMIN_ID, "❌ Заявка не найдена.")
+            return
+        
+        user_id, username, phone, fio = row
+        
+        cur.execute('''
+            INSERT OR REPLACE INTO hidden_data (user_id, username, phone, fio)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, phone, fio))
+        
+        cur.execute("UPDATE hide_requests SET status = 'approved', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
+        conn.commit()
+        conn.close()
+        
+        safe_send_message(
+            user_id,
+            f"✅ Ваша заявка на скрытие данных ОДОБРЕНА!\n\n"
+            f"🔒 Теперь эти данные скрыты от поиска:\n"
+            f"📱 Телефон: {phone or '—'}\n"
+            f"👤 ФИО: {fio}\n"
+            f"👤 Username: @{username}\n"
+            f"🆔 ID: {user_id}"
+        )
+        safe_send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
+    except Exception as e:
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reject_hide_'))
+def reject_hide(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    
+    request_id = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM hide_requests WHERE id = ?", (request_id,))
+        row = cur.fetchone()
+        if row:
+            user_id = row[0]
+            cur.execute("UPDATE hide_requests SET status = 'rejected', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
+            conn.commit()
+            safe_send_message(
+                user_id,
+                "❌ Ваша заявка на скрытие данных ОТКЛОНЕНА\n\n"
+                "📌 Возможно, данные не соответствуют требованиям.\n"
+                "🔄 Попробуй отправить заявку ещё раз с корректными данными."
+            )
+        conn.close()
+        safe_send_message(ADMIN_ID, f"❌ Заявка #{request_id} отклонена.")
+    except Exception as e:
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "list_hide_requests")
+def list_hide_requests(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id)
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        conn.close()
+        
+        if not rows:
+            safe_send_message(ADMIN_ID, "📋 Нет активных заявок.")
+            return
+        
+        text = "📋 Заявки на скрытие данных\n\n"
+        for row in rows[:10]:
+            req_id, user_id, username, phone, fio, created = row
+            text += (
+                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
+                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
+                f"   🕐 {created[:16]}\n\n"
+            )
+        
+        markup = types.InlineKeyboardMarkup()
+        for row in rows[:5]:
+            req_id = row[0]
+            markup.add(
+                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
+                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
+            )
+        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
+        
+        safe_send_message(ADMIN_ID, text, reply_markup=markup)
+    except Exception as e:
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ВСЕХ ОСТАЛЬНЫХ СООБЩЕНИЙ (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ) ====================
+
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    try:
+        text = message.text.strip()
+        
+        if not text:
+            return
+        
+        if TECH_MODE and message.from_user.id != ADMIN_ID:
+            safe_send_message(message.chat.id, "🔧 Бот на техническом обслуживании\n\n⏰ Вернёмся через несколько минут!")
+            return
+        
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        
+        if user_search_mode.get(user_id):
+            mode = user_search_mode.pop(user_id)
+            run_search_sync(chat_id, user_id, text, mode)
+            return
+        
+        if check_hidden_data(text):
+            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+            return
+        
+        is_digits = re.match(r'^[\d\s\-()+.]+$', text)
+        
+        if is_digits:
+            markup = get_choice_keyboard_for_numbers()
+            user_state[f"search_query_{user_id}"] = text
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
+        else:
+            markup = get_choice_keyboard_for_text()
+            user_state[f"search_query_{user_id}"] = text
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
+        
+    except Exception as e:
+        logger.error(f"Handle text error: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ВСЕХ ОСТАЛЬНЫХ CALLBACK (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ) ====================
 
 @bot.callback_query_handler(func=lambda call: True)
 def global_callback_handler(call):
     try:
-        # Отвечаем на callback, чтобы убрать "часики"
         bot.answer_callback_query(call.id)
         
         data = call.data
@@ -1837,28 +1934,7 @@ def global_callback_handler(call):
             bot.answer_callback_query(call.id, f"🔍 Поиск в режиме: {mode}")
             user_search_mode[user_id] = mode
             
-            # Запускаем поиск синхронно
             run_search_sync(call.message.chat.id, user_id, query, mode)
-            return
-        
-        # ===== ОБРАБОТЧИК СКРЫТИЯ ДАННЫХ =====
-        if data == "hide_data":
-            hide_data_callback(call)
-            return
-        
-        if data.startswith('approve_hide_') or data.startswith('reject_hide_'):
-            if data.startswith('approve_hide_'):
-                approve_hide(call)
-            else:
-                reject_hide(call)
-            return
-        
-        if data == "list_hide_requests":
-            list_hide_requests(call)
-            return
-        
-        if data == "send_contact_hide":
-            send_contact_hide(call)
             return
         
         # ===== МЕНЮ =====
@@ -2073,119 +2149,10 @@ def global_callback_handler(call):
         except:
             pass
 
-# ==================== ОБРАБОТЧИК ТЕКСТА (ВСЕ СООБЩЕНИЯ) ====================
-
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    try:
-        text = message.text.strip()
-        
-        # ===== ПРОПУСКАЕМ КОМАНДЫ =====
-        if text.startswith('/'):
-            return
-        
-        if not text:
-            return
-        
-        if TECH_MODE and message.from_user.id != ADMIN_ID:
-            safe_send_message(message.chat.id, "🔧 Бот на техническом обслуживании\n\n⏰ Вернёмся через несколько минут!")
-            return
-        
-        user_id = message.from_user.id
-        chat_id = message.chat.id
-        
-        if user_search_mode.get(user_id):
-            mode = user_search_mode.pop(user_id)
-            run_search_sync(chat_id, user_id, text, mode)
-            return
-        
-        if check_hidden_data(text):
-            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
-            return
-        
-        is_digits = re.match(r'^[\d\s\-()+.]+$', text)
-        
-        if is_digits:
-            markup = get_choice_keyboard_for_numbers()
-            user_state[f"search_query_{user_id}"] = text
-            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
-        else:
-            markup = get_choice_keyboard_for_text()
-            user_state[f"search_query_{user_id}"] = text
-            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
-        
-    except Exception as e:
-        logger.error(f"Handle text error: {e}")
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-# ==================== МЕНЮ ====================
-
-def main_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👁️ ГЛОБАЛЬНЫЙ ПОИСК", callback_data="global_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📱 ТЕЛЕФОН", callback_data="phone_search"),
-        types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👤 USERNAME", callback_data="username_search"),
-        types.InlineKeyboardButton("🌐 IP/ДОМЕН", callback_data="domain_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🌍 ГЕОИНТ", callback_data="geoint_search"),
-        types.InlineKeyboardButton("🖼️ МЕТАДАННЫЕ", callback_data="metadata_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📱 TELEGRAM", callback_data="telegram_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🔒 СКРЫТЬ ДАННЫЕ", callback_data="hide_data"),
-        types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance"),
-        types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
-    )
-    return markup
-
-# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
-
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    try:
-        logger.info(f"Start command from {message.from_user.id}")
-        remaining = get_remaining(message.from_user.id)
-        user_id = message.from_user.id
-        user_state.pop(user_id, None)
-        user_state.pop(f"search_query_{user_id}", None)
-        user_search_mode.pop(user_id, None)
-        
-        safe_send_message(
-            message.chat.id,
-            f"👁️ Глаз Исиды — OSINT\n\n"
-            f"🕵️ Привет, {message.from_user.first_name}!\n"
-            f"⚡ Глубокий OSINT-поиск\n"
-            f"🛡️ Множество источников\n\n"
-            f"📊 Осталось: {remaining}/5\n\n"
-            f"📌 Выбери действие:",
-            reply_markup=main_menu_keyboard()
-        )
-    except Exception as e:
-        logger.error(f"Start error: {e}")
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
-    # ===== ПРАВИЛЬНЫЙ ПОРЯДОК ИНИЦИАЛИЗАЦИИ =====
-    # 1. Сначала создаем таблицы
     init_db()
-    # 2. Потом добавляем новые колонки (миграция)
     migrate_db()
     
     logger.info("👁️ Глаз Исиды — OSINT запускается...")

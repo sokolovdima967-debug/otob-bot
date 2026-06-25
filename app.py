@@ -290,13 +290,14 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
-def check_hidden_data(query: str, qtype: str) -> bool:
-    """Проверяет, скрыты ли данные этого пользователя (с нормализацией номера)"""
+def check_hidden_data(query: str) -> bool:
+    """
+    Универсальная проверка скрытых данных.
+    Проверяет ЛЮБЫЕ форматы: номера, email, ФИО, username, IP, домены.
+    """
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        
-        # Получаем все скрытые записи
         cur.execute('''
             SELECT phone, email, fio, username_hide, ip, domain FROM hidden_data
         ''')
@@ -306,53 +307,127 @@ def check_hidden_data(query: str, qtype: str) -> bool:
         if not hidden_rows:
             return False
         
-        # Нормализуем запрос для проверки
-        variants = [query]
+        # Генерируем ВСЕ возможные варианты запроса
+        variants = []
         
-        if qtype == "phone":
-            # Очищаем номер от лишних символов
-            clean = re.sub(r'[\s\-()+]', '', query)
-            clean = re.sub(r'^\+', '', clean)
+        # 1. Исходный запрос (как есть)
+        variants.append(query)
+        
+        # 2. Запрос в нижнем регистре
+        variants.append(query.lower())
+        
+        # 3. Запрос без пробелов
+        variants.append(''.join(query.split()))
+        variants.append(''.join(query.lower().split()))
+        
+        # 4. Если это номер телефона — генерируем все форматы
+        clean = re.sub(r'[\s\-()+]', '', query)
+        clean = re.sub(r'^\+', '', clean)
+        
+        if clean.isdigit() and len(clean) >= 10:
+            # Варианты номера
+            variants.append(clean)                     # 79991234567
+            variants.append('+' + clean)               # +79991234567
+            variants.append('8' + clean[1:])           # 89991234567
+            variants.append('+8' + clean[1:])          # +89991234567
+            variants.append('7' + clean[1:])           # 79991234567 (уже есть)
+            variants.append('+7' + clean[1:])          # +79991234567 (уже есть)
             
-            variants = []
-            variants.append(clean)
-            variants.append('+' + clean)
-            
-            if clean.startswith('7'):
-                variants.append('8' + clean[1:])
-            elif clean.startswith('8'):
-                variants.append('7' + clean[1:])
-            
+            # Если номер начинается с 8
             if clean.startswith('8'):
                 variants.append('7' + clean[1:])
+                variants.append('+7' + clean[1:])
             elif clean.startswith('7'):
                 variants.append('8' + clean[1:])
-            
-            if clean.startswith('7'):
-                variants.append('+7' + clean[1:])
                 variants.append('+8' + clean[1:])
-            elif clean.startswith('8'):
-                variants.append('+8' + clean[1:])
-                variants.append('+7' + clean[1:])
+        
+        # 5. Для email, username, домена — пробуем с @ и без
+        if '@' in query:
+            variants.append(query.lower())
+            variants.append(query.replace('@', ''))
+        else:
+            variants.append(query + '@')
+        
+        # 6. Для ФИО — пробуем разные варианты написания
+        if len(query.split()) >= 2:
+            parts = query.split()
+            # Все варианты перестановок
+            for i in range(len(parts)):
+                for j in range(len(parts)):
+                    if i != j:
+                        variants.append(' '.join([parts[i], parts[j]]))
+            # Сокращения
+            if len(parts) >= 2:
+                variants.append(parts[0][0] + '. ' + parts[1])
+                variants.append(parts[0][0] + '. ' + parts[1] + ' ' + (parts[2][0] + '.' if len(parts) > 2 else ''))
+        
+        # 7. Для IP — убираем пробелы
+        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', query):
+            variants.append(query.strip())
+        
+        # Убираем дубликаты
+        variants = list(set(variants))
         
         # Проверяем все варианты
         for row in hidden_rows:
             phone, email, fio, username_hide, ip, domain = row
+            
             for v in variants:
+                v = v.strip()
+                if not v:
+                    continue
+                
+                # Телефон
                 if phone:
                     phone_clean = re.sub(r'[\s\-()+]', '', phone)
                     phone_clean = re.sub(r'^\+', '', phone_clean)
-                    if v == phone or v == phone_clean or v == '+' + phone_clean:
+                    phone_variants = [
+                        phone,
+                        phone_clean,
+                        '+' + phone_clean,
+                        '8' + phone_clean[1:],
+                        '+8' + phone_clean[1:],
+                        '7' + phone_clean[1:],
+                        '+7' + phone_clean[1:]
+                    ]
+                    if v in phone_variants:
                         return True
-                if email and v == email:
+                
+                # Email (нижний регистр)
+                if email and v == email.lower():
                     return True
-                if fio and v == fio:
+                if email and v == email.lower().replace('@', ''):
                     return True
-                if username_hide and v == username_hide:
+                
+                # ФИО (нижний регистр, без лишних пробелов)
+                if fio:
+                    fio_clean = ' '.join(fio.lower().split())
+                    v_clean = ' '.join(v.lower().split())
+                    if v_clean == fio_clean:
+                        return True
+                    # Сокращения
+                    fio_parts = fio_clean.split()
+                    v_parts = v_clean.split()
+                    if len(fio_parts) >= 2 and len(v_parts) >= 2:
+                        if fio_parts[0][0] == v_parts[0][0] and fio_parts[1] == v_parts[1]:
+                            return True
+                
+                # Username (нижний регистр)
+                if username_hide and v == username_hide.lower():
                     return True
-                if ip and v == ip:
+                if username_hide and v == username_hide.lower().replace('@', ''):
                     return True
-                if domain and v == domain:
+                
+                # IP
+                if ip and v == ip.strip():
+                    return True
+                
+                # Домен (нижний регистр)
+                if domain and v == domain.lower():
+                    return True
+                if domain and v == domain.lower().replace('www.', ''):
+                    return True
+                if domain and v == 'www.' + domain.lower():
                     return True
         return False
     except Exception as e:
@@ -2320,6 +2395,18 @@ def handle_text(message):
         if not can_search(user_id):
             bot.reply_to(message, "❌ *Лимит поисков исчерпан!*\n\n⏰ Сброс в 00:00 МСК", parse_mode="Markdown")
             return
+        
+        # ====== УНИВЕРСАЛЬНАЯ ПРОВЕРКА СКРЫТЫХ ДАННЫХ ======
+        if check_hidden_data(text):
+            bot.reply_to(
+                message,
+                "🔒 *Человек скрыл свои данные*\n\n"
+                "Данные этого пользователя скрыты по его запросу.\n\n"
+                "🛡️ @Arhapov",
+                parse_mode="Markdown"
+            )
+            return
+        # =====================================================
         
         start_time = time.time()
         msg = bot.reply_to(

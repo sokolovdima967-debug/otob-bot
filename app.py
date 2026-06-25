@@ -10,6 +10,7 @@ import json
 import sys
 import threading
 import traceback
+import subprocess
 from datetime import datetime
 from bs4 import BeautifulSoup
 import telebot
@@ -28,7 +29,7 @@ from PIL.ExifTags import TAGS
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "8545020464"))
 DB_PATH = os.path.join("/tmp", "glaz_isidy_bot.db")
-SEARCH_TIMEOUT = 90
+SEARCH_TIMEOUT = 120
 TECH_MODE = False
 user_state = {}
 
@@ -50,6 +51,8 @@ if not TOKEN:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ==================== БЕЗОПАСНАЯ ОТПРАВКА СООБЩЕНИЙ ====================
 
 def safe_send_message(chat_id, text, parse_mode="Markdown", reply_markup=None, max_length=4000):
     """Безопасная отправка сообщения с обрезкой и fallback"""
@@ -306,7 +309,6 @@ def detect_query_type(query: str) -> str:
     return "text"
 
 def check_hidden_data(query: str) -> bool:
-    """Универсальная проверка скрытых данных с уведомлением владельца"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -378,12 +380,6 @@ def check_hidden_data(query: str) -> bool:
                     if v_clean == fio_clean:
                         _notify_owner(owner_id, query)
                         return True
-                    fio_parts = fio_clean.split()
-                    v_parts = v_clean.split()
-                    if len(fio_parts) >= 2 and len(v_parts) >= 2:
-                        if fio_parts[0][0] == v_parts[0][0] and fio_parts[1] == v_parts[1]:
-                            _notify_owner(owner_id, query)
-                            return True
                 if username_hide and (v == username_hide.lower() or v == username_hide.lower().replace('@', '')):
                     _notify_owner(owner_id, query)
                     return True
@@ -399,69 +395,20 @@ def check_hidden_data(query: str) -> bool:
         return False
 
 def _notify_owner(owner_id: int, query: str):
-    """Отправляет уведомление только владельцу скрытых данных"""
     try:
-        bot.send_message(
+        safe_send_message(
             owner_id,
             f"🛡️ *Уведомление о попытке поиска*\n\n"
             f"🔍 Кто-то попытался найти информацию по запросу:\n"
             f"`{query}`\n\n"
             f"🛡️ *Ваши данные защищены!*\n"
             f"🔒 Информация не была передана.\n\n"
-            f"👁️ @Arhapov",
-            parse_mode="Markdown"
+            f"👁️ @Arhapov"
         )
     except Exception as e:
         logger.error(f"Notify owner error: {e}")
 
-# ==================== ПАРСЕР С ОБХОДОМ ====================
-
-async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) -> list:
-    headers = {
-        "User-Agent": ua.random,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-    results = []
-    try:
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: curl_requests.get(
-                url,
-                headers=headers,
-                impersonate="chrome110",
-                timeout=15,
-                verify=False
-            )
-        )
-        if response.status_code == 200:
-            html = response.text
-            soup = BeautifulSoup(html, 'html5lib')
-            items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
-            for item in items[:max_results]:
-                title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
-                link_elem = item.select_one(selectors.get("link", "a"))
-                text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
-                extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
-                result = {
-                    "title": title_elem.get_text(strip=True) if title_elem else "—",
-                    "link": link_elem.get('href') if link_elem else None,
-                    "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
-                    "extra": extra_elem.get_text(strip=True) if extra_elem else None
-                }
-                if result["link"] and result["link"].startswith('/'):
-                    result["link"] = f"https://{url.split('/')[2]}{result['link']}"
-                if result["title"] != "—" or result["text"] != "—":
-                    results.append(result)
-    except Exception as e:
-        logger.error(f"Parse error for {url}: {e}")
-    return results
-
-# ==================== ВСЕ ФУНКЦИИ ПОИСКА ====================
+# ==================== ФУНКЦИИ ПОИСКА ====================
 
 async def phonenumbers_info(phone: str) -> dict:
     try:
@@ -985,189 +932,52 @@ async def whatcms_lookup(domain: str) -> dict:
         logger.error(f"WhatCMS error: {e}")
         return {"found": False}
 
-async def geoint_lookup(query: str) -> dict:
-    try:
-        if re.match(r'^-?\d{1,3}\.\d+,-?\d{1,3}\.\d+$', query):
-            lat, lon = query.split(',')
-            url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return {
-                            "found": True,
-                            "address": data.get('display_name', '—'),
-                            "lat": lat,
-                            "lon": lon
-                        }
-        else:
-            url = f"https://nominatim.openstreetmap.org/search?q={query}&format=json"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data:
-                            return {
-                                "found": True,
-                                "address": data[0].get('display_name', '—'),
-                                "lat": data[0].get('lat', '—'),
-                                "lon": data[0].get('lon', '—')
-                            }
-    except:
-        pass
-    return {"found": False}
+# ==================== ПАРСЕР С ОБХОДОМ ====================
 
-async def metadata_lookup(file_url: str) -> dict:
+async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) -> list:
+    headers = {
+        "User-Agent": ua.random,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    results = []
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    temp_path = f"/tmp/temp_{int(time.time())}.jpg"
-                    with open(temp_path, 'wb') as f:
-                        f.write(data)
-                    img = Image.open(temp_path)
-                    exifdata = img.getexif()
-                    result = {}
-                    for tag_id, value in exifdata.items():
-                        tag = TAGS.get(tag_id, tag_id)
-                        if isinstance(value, bytes):
-                            try:
-                                value = value.decode('utf-8', errors='ignore')
-                            except:
-                                value = str(value)
-                        result[tag] = value
-                    os.remove(temp_path)
-                    return {
-                        "found": True,
-                        "metadata": result,
-                        "size": len(data),
-                        "format": img.format
-                    }
-    except:
-        pass
-    return {"found": False}
-
-async def telegram_account_search(username: str) -> dict:
-    try:
-        clean = username.replace('@', '').strip()
-        url = f"https://t.me/{clean}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('tgme_page_title'))
-                    bio = soup.find('div', class_=re.compile('tgme_page_description'))
-                    photo = soup.find('img', class_=re.compile('tgme_page_photo_image'))
-                    return {
-                        "found": True,
-                        "username": clean,
-                        "name": name.get_text(strip=True) if name else "—",
-                        "bio": bio.get_text(strip=True) if bio else "—",
-                        "photo_url": photo.get('src') if photo else "—",
-                        "url": f"https://t.me/{clean}"
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-async def syncme_lookup(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://sync.me/search?q={clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|title'))
-                    spam = soup.find('span', class_=re.compile('spam|risk'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—",
-                        "spam_level": spam.get_text(strip=True) if spam else "—"
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-async def whoseno_lookup(phone: str) -> dict:
-    try:
-        clean = clean_phone(phone)
-        url = f"https://whoseno.com/search?q={clean}"
-        headers = {"User-Agent": ua.random}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html5lib')
-                    name = soup.find('div', class_=re.compile('name|result|contact'))
-                    return {
-                        "found": True if name else False,
-                        "name": name.get_text(strip=True) if name else "—"
-                    }
-                return {"found": False}
-    except:
-        return {"found": False}
-
-async def leaklookup_lookup(query: str) -> dict:
-    try:
-        url = f"https://leak-lookup.com/api/search?query={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('found'):
-                        return {
-                            "found": True,
-                            "sources": data.get('sources', [])[:5]
-                        }
-    except:
-        pass
-    return {"found": False}
-
-async def noimosiny_lookup(query: str) -> list:
-    try:
-        url = f"https://noimosiny.com/api/search?q={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('results', [])[:10]
-    except:
-        pass
-    return []
-
-async def osint_industries_lookup(query: str) -> list:
-    try:
-        url = f"https://osint.industries/api/search?q={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('results', [])[:10]
-    except:
-        pass
-    return []
-
-async def epieos_lookup(query: str) -> dict:
-    try:
-        url = f"https://epieos.com/api/check?query={query}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return {
-                        "found": True,
-                        "social": data.get('social', {}),
-                        "google": data.get('google', {}),
-                        "breaches": data.get('breaches', [])[:5]
-                    }
-    except:
-        pass
-    return {"found": False}
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: curl_requests.get(
+                url,
+                headers=headers,
+                impersonate="chrome110",
+                timeout=15,
+                verify=False
+            )
+        )
+        if response.status_code == 200:
+            html = response.text
+            soup = BeautifulSoup(html, 'html5lib')
+            items = soup.select(selectors.get("result", "div.result, li.result, .item, .post, .entry, .card"))
+            for item in items[:max_results]:
+                title_elem = item.select_one(selectors.get("title", "a, h2, h3, .title, .name"))
+                link_elem = item.select_one(selectors.get("link", "a"))
+                text_elem = item.select_one(selectors.get("text", "p, .text, .description"))
+                extra_elem = item.select_one(selectors.get("extra", ".phone, .number, .address, .email"))
+                result = {
+                    "title": title_elem.get_text(strip=True) if title_elem else "—",
+                    "link": link_elem.get('href') if link_elem else None,
+                    "text": text_elem.get_text(strip=True)[:300] if text_elem else "—",
+                    "extra": extra_elem.get_text(strip=True) if extra_elem else None
+                }
+                if result["link"] and result["link"].startswith('/'):
+                    result["link"] = f"https://{url.split('/')[2]}{result['link']}"
+                if result["title"] != "—" or result["text"] != "—":
+                    results.append(result)
+    except Exception as e:
+        logger.error(f"Parse error for {url}: {e}")
+    return results
 
 # ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
@@ -1196,27 +1006,21 @@ async def global_lookup(query: str) -> dict:
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
             ("hudsonrock", run_with_timeout(hudsonrock_lookup(query), 8)),
             ("dehashed", run_with_timeout(dehashed_lookup(query), 8)),
-            ("syncme", run_with_timeout(syncme_lookup(query), 8)),
-            ("whoseno", run_with_timeout(whoseno_lookup(query), 8)),
-            ("revealname", run_with_timeout(revealname_check(query), 8)),
-            ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
-            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
-            ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
-            ("epieos", run_with_timeout(epieos_lookup(query), 10)),
-            ("xray", run_with_timeout(xray_lookup(query), 10)),
-            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 10)),
-            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 10)),
-            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 10)),
-            ("whitepages", run_with_timeout(whitepages_check(query), 8)),
-            ("callerid", run_with_timeout(callerid_check(query), 8)),
-            ("spydialer", run_with_timeout(spydialer_check(query), 8)),
-            ("usphonebook", run_with_timeout(usphonebook_check(query), 8)),
-            ("fouroneone", run_with_timeout(fouroneone_check(query), 8)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 8)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 8)),
-            ("google_dorks", run_with_timeout(google_dorks_search(query), 10)),
+            ("truepeoplesearch", run_with_timeout(truepeoplesearch_lookup(query), 8)),
+            ("fastpeoplesearch", run_with_timeout(fastpeoplesearch_parse(query), 6)),
+            ("thatsthem", run_with_timeout(thatsthem_lookup(query), 6)),
+            ("whitepages", run_with_timeout(whitepages_check(query), 6)),
+            ("revealname", run_with_timeout(revealname_check(query), 6)),
+            ("callerid", run_with_timeout(callerid_check(query), 6)),
+            ("spydialer", run_with_timeout(spydialer_check(query), 6)),
+            ("usphonebook", run_with_timeout(usphonebook_check(query), 6)),
+            ("fouroneone", run_with_timeout(fouroneone_check(query), 6)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
+            ("xray", run_with_timeout(xray_lookup(query), 6)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
+            ("google_dorks", run_with_timeout(google_dorks_search(query), 8)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
@@ -1228,28 +1032,21 @@ async def global_lookup(query: str) -> dict:
             ("hibp", run_with_timeout(hibp_lookup(query), 8)),
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
             ("dehashed", run_with_timeout(dehashed_lookup(query), 8)),
-            ("epieos", run_with_timeout(epieos_lookup(query), 10)),
-            ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
-            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
-            ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 8)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
     
     elif qtype == "username":
         tasks = [
-            ("xray", run_with_timeout(xray_lookup(query), 10)),
-            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 8)),
-            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 8)),
-            ("pipl", run_with_timeout(pipl_lookup(query), 8)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("xray", run_with_timeout(xray_lookup(query), 6)),
+            ("idcrawl", run_with_timeout(idcrawl_lookup(query), 6)),
+            ("socialsearch", run_with_timeout(socialsearch_lookup(query), 6)),
+            ("pipl", run_with_timeout(pipl_lookup(query), 6)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
             ("leakcheck", run_with_timeout(leakcheck_lookup(query), 8)),
-            ("leaklookup", run_with_timeout(leaklookup_lookup(query), 8)),
-            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
-            ("osint_industries", run_with_timeout(osint_industries_lookup(query), 8)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
@@ -1260,8 +1057,7 @@ async def global_lookup(query: str) -> dict:
             ("ip_api", run_with_timeout(ip_api_lookup(query), 6)),
             ("shodan", run_with_timeout(shodan_lookup(query), 8)),
             ("exonera", run_with_timeout(exonera_check(query), 8)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
-            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
         ]
     
     elif qtype == "domain":
@@ -1269,14 +1065,13 @@ async def global_lookup(query: str) -> dict:
             ("virustotal", run_with_timeout(virustotal_lookup(query), 8)),
             ("dns_enum", run_with_timeout(dns_enum(query), 8)),
             ("whatcms", run_with_timeout(whatcms_lookup(query), 8)),
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
         ]
     else:
         tasks = [
-            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 10)),
+            ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
             ("ahmia", run_with_timeout(ahmia_search(query), 12)),
-            ("noimosiny", run_with_timeout(noimosiny_lookup(query), 8)),
             ("intelx", run_with_timeout(intelx_lookup(query), 10)),
         ]
     
@@ -1709,17 +1504,16 @@ def process_hide_data_fields(message):
             types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
             types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
         )
-        bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=markup)
         
-        bot.send_message(
+        safe_send_message(
             user_id,
             "✅ *Заявка отправлена!*\n\n"
             "⏳ Ожидай решения администратора.\n"
-            "📨 Уведомление придёт, когда заявка будет рассмотрена.",
-            parse_mode="Markdown"
+            "📨 Уведомление придёт, когда заявка будет рассмотрена."
         )
     except Exception as e:
-        bot.send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
+        safe_send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hide_'))
 def approve_hide(call):
@@ -1739,7 +1533,7 @@ def approve_hide(call):
         ''', (request_id,))
         row = cur.fetchone()
         if not row:
-            bot.send_message(ADMIN_ID, "❌ Заявка не найдена.")
+            safe_send_message(ADMIN_ID, "❌ Заявка не найдена.")
             return
         
         user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain = row
@@ -1754,7 +1548,7 @@ def approve_hide(call):
         conn.commit()
         conn.close()
         
-        bot.send_message(
+        safe_send_message(
             user_id,
             "✅ *Ваша заявка на скрытие данных ОДОБРЕНА!*\n\n"
             "🔒 Ваши данные теперь скрыты от поиска.\n\n"
@@ -1764,12 +1558,11 @@ def approve_hide(call):
             f"• ФИО: {fio or '—'}\n"
             f"• Username: {username_hide or '—'}\n"
             f"• IP: {ip or '—'}\n"
-            f"• Домен: {domain or '—'}",
-            parse_mode="Markdown"
+            f"• Домен: {domain or '—'}"
         )
-        bot.send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
+        safe_send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('reject_hide_'))
 def reject_hide(call):
@@ -1789,17 +1582,16 @@ def reject_hide(call):
             user_id = row[0]
             cur.execute("UPDATE hide_requests SET status = 'rejected', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
             conn.commit()
-            bot.send_message(
+            safe_send_message(
                 user_id,
                 "❌ *Ваша заявка на скрытие данных ОТКЛОНЕНА*\n\n"
                 "📌 Возможно, данные не соответствуют требованиям.\n"
-                "🔄 Попробуй отправить заявку ещё раз с корректными данными.",
-                parse_mode="Markdown"
+                "🔄 Попробуй отправить заявку ещё раз с корректными данными."
             )
         conn.close()
-        bot.send_message(ADMIN_ID, f"❌ Заявка #{request_id} отклонена.")
+        safe_send_message(ADMIN_ID, f"❌ Заявка #{request_id} отклонена.")
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "list_hide_requests")
 def list_hide_requests(call):
@@ -1817,7 +1609,7 @@ def list_hide_requests(call):
         conn.close()
         
         if not rows:
-            bot.send_message(ADMIN_ID, "📋 *Нет активных заявок.*", parse_mode="Markdown")
+            safe_send_message(ADMIN_ID, "📋 *Нет активных заявок.*")
             return
         
         text = "📋 *Заявки на скрытие данных*\n\n"
@@ -1839,16 +1631,16 @@ def list_hide_requests(call):
             )
         markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
         
-        bot.send_message(ADMIN_ID, text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(ADMIN_ID, text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
 
 # ==================== АДМИН-КОМАНДЫ ====================
 
 @bot.message_handler(commands=['adminhelp'])
 def admin_help_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     
     help_text = (
@@ -1868,31 +1660,31 @@ def admin_help_command(message):
         "👁️ *Глаз Исиды — OSINT*\n"
         "🛡️ @Arhapov"
     )
-    bot.reply_to(message, help_text, parse_mode="Markdown")
+    safe_send_message(message.chat.id, help_text)
 
 @bot.message_handler(commands=['tech'])
 def tech_command(message):
     global TECH_MODE
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     args = message.text.split()
     if len(args) < 2:
-        bot.reply_to(message, "❗ /tech on/off")
+        safe_send_message(message.chat.id, "❗ /tech on/off")
         return
     if args[1].lower() == "on":
         TECH_MODE = True
-        bot.reply_to(message, "🔧 *Техперерыв ВКЛЮЧЁН*", parse_mode="Markdown")
+        safe_send_message(message.chat.id, "🔧 *Техперерыв ВКЛЮЧЁН*")
     elif args[1].lower() == "off":
         TECH_MODE = False
-        bot.reply_to(message, "✅ *Техперерыв ВЫКЛЮЧЕН*", parse_mode="Markdown")
+        safe_send_message(message.chat.id, "✅ *Техперерыв ВЫКЛЮЧЕН*")
     else:
-        bot.reply_to(message, "❗ /tech on или /tech off")
+        safe_send_message(message.chat.id, "❗ /tech on или /tech off")
 
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -1904,26 +1696,25 @@ def stats_command(message):
         cur.execute("SELECT COUNT(*) FROM hide_requests WHERE status = 'pending'")
         pending_requests = cur.fetchone()[0] or 0
         conn.close()
-        bot.reply_to(
-            message,
+        safe_send_message(
+            message.chat.id,
             f"📊 *Статистика бота*\n\n"
             f"👥 Всего пользователей: **{total_users}**\n"
             f"🔍 Всего поисков: **{total_searches}**\n"
             f"📋 Заявок на скрытие: **{pending_requests}**\n"
-            f"👑 Админ: @Arhapov",
-            parse_mode="Markdown"
+            f"👑 Админ: @Arhapov"
         )
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 @bot.message_handler(commands=['broadcast'])
 def broadcast_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     text = message.text.replace('/broadcast', '').strip()
     if not text:
-        bot.reply_to(message, "❗ /broadcast <текст сообщения>")
+        safe_send_message(message.chat.id, "❗ /broadcast <текст сообщения>")
         return
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -1934,19 +1725,19 @@ def broadcast_command(message):
         sent = 0
         for user in users:
             try:
-                bot.send_message(user[0], f"📢 *Рассылка*\n\n{text}", parse_mode="Markdown")
+                safe_send_message(user[0], f"📢 *Рассылка*\n\n{text}")
                 sent += 1
                 time.sleep(0.05)
             except:
                 continue
-        bot.reply_to(message, f"✅ Рассылка отправлена **{sent}** пользователям.", parse_mode="Markdown")
+        safe_send_message(message.chat.id, f"✅ Рассылка отправлена **{sent}** пользователям.")
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 @bot.message_handler(commands=['requests'])
 def requests_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -1955,7 +1746,7 @@ def requests_command(message):
         rows = cur.fetchall()
         conn.close()
         if not rows:
-            bot.reply_to(message, "📋 *Нет активных заявок.*", parse_mode="Markdown")
+            safe_send_message(message.chat.id, "📋 *Нет активных заявок.*")
             return
         text = "📋 *Заявки на скрытие данных*\n\n"
         for row in rows[:10]:
@@ -1974,18 +1765,18 @@ def requests_command(message):
                 types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
             )
         markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
-        bot.reply_to(message, text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 @bot.message_handler(commands=['hide'])
 def hide_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     args = message.text.split()
     if len(args) < 2:
-        bot.reply_to(message, "❗ /hide <user_id>")
+        safe_send_message(message.chat.id, "❗ /hide <user_id>")
         return
     target_id = int(args[1])
     try:
@@ -1994,56 +1785,55 @@ def hide_command(message):
         cur.execute("DELETE FROM hidden_data WHERE user_id = ?", (target_id,))
         conn.commit()
         conn.close()
-        bot.reply_to(
-            message,
-            f"✅ Данные пользователя `{target_id}` раскрыты.\n\n🔓 Теперь его данные снова видны в поиске.",
-            parse_mode="Markdown"
+        safe_send_message(
+            message.chat.id,
+            f"✅ Данные пользователя `{target_id}` раскрыты.\n\n🔓 Теперь его данные снова видны в поиске."
         )
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 @bot.message_handler(commands=['give'])
 def give_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     try:
         args = message.text.split()
         if len(args) < 3:
-            bot.reply_to(message, "❗ /give <кол-во> <user_id>")
+            safe_send_message(message.chat.id, "❗ /give <кол-во> <user_id>")
             return
         amount = int(args[1])
         target_id = int(args[2])
         user = get_user(target_id)
         user["searches_today"] = max(0, user["searches_today"] - amount)
         update_user(target_id, user)
-        bot.reply_to(message, f"✅ Выдано {amount} запросов пользователю `{target_id}`.", parse_mode="Markdown")
+        safe_send_message(message.chat.id, f"✅ Выдано {amount} запросов пользователю `{target_id}`.")
     except:
-        bot.reply_to(message, "⚠️ Ошибка. /give <кол-во> <user_id>")
+        safe_send_message(message.chat.id, "⚠️ Ошибка. /give <кол-во> <user_id>")
 
 @bot.message_handler(commands=['take'])
 def take_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     try:
         args = message.text.split()
         if len(args) < 3:
-            bot.reply_to(message, "❗ /take <кол-во> <user_id>")
+            safe_send_message(message.chat.id, "❗ /take <кол-во> <user_id>")
             return
         amount = int(args[1])
         target_id = int(args[2])
         user = get_user(target_id)
         user["searches_extra"] = max(0, user["searches_extra"] - amount)
         update_user(target_id, user)
-        bot.reply_to(message, f"✅ Забрано {amount} запросов у пользователя `{target_id}`.", parse_mode="Markdown")
+        safe_send_message(message.chat.id, f"✅ Забрано {amount} запросов у пользователя `{target_id}`.")
     except:
-        bot.reply_to(message, "⚠️ Ошибка. /take <кол-во> <user_id>")
+        safe_send_message(message.chat.id, "⚠️ Ошибка. /take <кол-во> <user_id>")
 
 @bot.message_handler(commands=['users'])
 def users_command(message):
     if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Только для админа.")
+        safe_send_message(message.chat.id, "❌ Только для админа.")
         return
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -2052,15 +1842,15 @@ def users_command(message):
         rows = cur.fetchall()
         conn.close()
         if not rows:
-            bot.reply_to(message, "📊 Нет пользователей.")
+            safe_send_message(message.chat.id, "📊 Нет пользователей.")
             return
         text = "📊 *Список пользователей*\n\n"
         for user_id, username, today, extra in rows[:20]:
             total = (5 - today) + extra
             text += f"• `{user_id}` — @{username or 'нет'} | запросов: {total}\n"
-        bot.reply_to(message, text, parse_mode="Markdown")
+        safe_send_message(message.chat.id, text)
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 # ==================== МЕНЮ ====================
 
@@ -2380,7 +2170,7 @@ def handle_text(message):
         msg = safe_send_message(
             chat_id,
             "👁️ *Глаз Исиды — глубокое сканирование...*\n"
-            "⏱️ Время: до 90 секунд\n"
+            "⏱️ Время: до 120 секунд\n"
             "🕵️ 45+ источников...\n"
             "🧅 Поиск в даркнете..."
         )
@@ -2390,11 +2180,11 @@ def handle_text(message):
             asyncio.set_event_loop(loop)
             try:
                 data = loop.run_until_complete(
-                    asyncio.wait_for(global_lookup(text), timeout=90)
+                    asyncio.wait_for(global_lookup(text), timeout=120)
                 )
             except asyncio.TimeoutError:
                 bot.edit_message_text(
-                    "⚠️ *Поиск прерван по таймауту (90 секунд)*\n\n"
+                    "⚠️ *Поиск прерван по таймауту (120 секунд)*\n\n"
                     "📌 Показаны только быстрые результаты.",
                     chat_id,
                     msg.message_id,
@@ -2451,7 +2241,7 @@ def handle_text(message):
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
         try:
-            bot.send_message(
+            safe_send_message(
                 message.chat.id,
                 f"⚠️ Ошибка: {str(e)[:100]}"
             )
@@ -2464,7 +2254,7 @@ if __name__ == "__main__":
     init_db()
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
     logger.info("🛡️ Канал: @Arhapov")
-    logger.info("⚡ Таймаут поиска: 90 секунд")
+    logger.info("⚡ Таймаут поиска: 120 секунд")
     logger.info("📊 45+ источников")
     logger.info("🧅 Даркнет: Ahmia · Exonera Tor · IntelX · WhatCMS")
     logger.info("🔄 Обход блокировок: curl_cffi")

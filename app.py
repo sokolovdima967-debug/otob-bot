@@ -54,8 +54,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== БЕЗОПАСНЫЕ ФУНКЦИИ ОТПРАВКИ ====================
 
-def safe_send_message(chat_id, text, parse_mode="Markdown", reply_markup=None, max_length=4000):
-    """Безопасная отправка сообщения с обрезкой и fallback"""
+def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None, max_length=4000):
     try:
         if len(text) > max_length:
             text = text[:max_length] + "...\n\n⚠️ Сообщение обрезано"
@@ -69,8 +68,7 @@ def safe_send_message(chat_id, text, parse_mode="Markdown", reply_markup=None, m
             return bot.send_message(chat_id, text[:2000] + "...\n\n⚠️ Сообщение обрезано", parse_mode=None, reply_markup=reply_markup)
         raise e
 
-def safe_edit_message(chat_id, message_id, text, parse_mode="Markdown", reply_markup=None, max_length=4000):
-    """Безопасное редактирование сообщения с обрезкой и fallback"""
+def safe_edit_message(chat_id, message_id, text, parse_mode=None, reply_markup=None, max_length=4000):
     try:
         if len(text) > max_length:
             text = text[:max_length] + "...\n\n⚠️ Сообщение обрезано"
@@ -104,11 +102,7 @@ def init_db():
                 username TEXT,
                 contact_phone TEXT,
                 phone TEXT,
-                email TEXT,
                 fio TEXT,
-                username_hide TEXT,
-                ip TEXT,
-                domain TEXT,
                 status TEXT DEFAULT 'pending',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 reviewed_by INTEGER
@@ -117,17 +111,11 @@ def init_db():
         cur.execute('''
             CREATE TABLE IF NOT EXISTS hidden_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
+                user_id INTEGER UNIQUE,
                 username TEXT,
-                contact_phone TEXT,
                 phone TEXT,
-                email TEXT,
                 fio TEXT,
-                username_hide TEXT,
-                ip TEXT,
-                domain TEXT,
-                hidden_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id)
+                hidden_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         conn.commit()
@@ -215,7 +203,7 @@ def get_remaining(user_id: int) -> int:
 
 reports = {}
 
-bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+bot = telebot.TeleBot(TOKEN, parse_mode=None)
 bot.remove_webhook()
 
 class ReportHandler(BaseHTTPRequestHandler):
@@ -323,87 +311,44 @@ def detect_query_type(query: str) -> str:
         return "domain"
     return "text"
 
+def get_user_data(user_id: int) -> dict:
+    try:
+        chat = bot.get_chat(user_id)
+        return {
+            "user_id": user_id,
+            "username": chat.username or "нет",
+            "first_name": chat.first_name or "—",
+            "last_name": chat.last_name or "—",
+            "phone": None
+        }
+    except:
+        return {
+            "user_id": user_id,
+            "username": "нет",
+            "first_name": "—",
+            "last_name": "—",
+            "phone": None
+        }
+
 def check_hidden_data(query: str) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute('''
-            SELECT user_id, phone, email, fio, username_hide, ip, domain FROM hidden_data
-        ''')
+        cur.execute('SELECT user_id, phone, fio FROM hidden_data')
         hidden_rows = cur.fetchall()
         conn.close()
         if not hidden_rows:
             return False
         
-        variants = []
-        variants.append(query)
-        variants.append(query.lower())
-        variants.append(''.join(query.split()))
-        variants.append(''.join(query.lower().split()))
-        
-        clean = re.sub(r'[\s\-()+]', '', query)
-        clean = re.sub(r'^\+', '', clean)
-        if clean.isdigit() and len(clean) >= 10:
-            variants.append(clean)
-            variants.append('+' + clean)
-            variants.append('8' + clean[1:])
-            variants.append('+8' + clean[1:])
-            if clean.startswith('8'):
-                variants.append('7' + clean[1:])
-                variants.append('+7' + clean[1:])
-            elif clean.startswith('7'):
-                variants.append('8' + clean[1:])
-                variants.append('+8' + clean[1:])
-        
-        if '@' in query:
-            variants.append(query.lower())
-            variants.append(query.replace('@', ''))
-        
-        if len(query.split()) >= 2:
-            parts = query.split()
-            for i in range(len(parts)):
-                for j in range(len(parts)):
-                    if i != j:
-                        variants.append(' '.join([parts[i], parts[j]]))
-            if len(parts) >= 2:
-                variants.append(parts[0][0] + '. ' + parts[1])
-        
-        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', query):
-            variants.append(query.strip())
-        
-        variants = list(set(variants))
-        
+        # Проверяем все варианты
         for row in hidden_rows:
-            owner_id, phone, email, fio, username_hide, ip, domain = row
-            for v in variants:
-                v = v.strip()
-                if not v:
-                    continue
-                if phone:
-                    phone_clean = re.sub(r'[\s\-()+]', '', phone)
-                    phone_clean = re.sub(r'^\+', '', phone_clean)
-                    phone_variants = [phone, phone_clean, '+' + phone_clean, '8' + phone_clean[1:], '+8' + phone_clean[1:], '7' + phone_clean[1:], '+7' + phone_clean[1:]]
-                    if v in phone_variants:
-                        _notify_owner(owner_id, query)
-                        return True
-                if email and (v == email.lower() or v == email.lower().replace('@', '')):
-                    _notify_owner(owner_id, query)
-                    return True
-                if fio:
-                    fio_clean = ' '.join(fio.lower().split())
-                    v_clean = ' '.join(v.lower().split())
-                    if v_clean == fio_clean:
-                        _notify_owner(owner_id, query)
-                        return True
-                if username_hide and (v == username_hide.lower() or v == username_hide.lower().replace('@', '')):
-                    _notify_owner(owner_id, query)
-                    return True
-                if ip and v == ip.strip():
-                    _notify_owner(owner_id, query)
-                    return True
-                if domain and (v == domain.lower() or v == domain.lower().replace('www.', '') or v == 'www.' + domain.lower()):
-                    _notify_owner(owner_id, query)
-                    return True
+            owner_id, phone, fio = row
+            if phone and query == phone:
+                _notify_owner(owner_id, query)
+                return True
+            if fio and query.lower() == fio.lower():
+                _notify_owner(owner_id, query)
+                return True
         return False
     except Exception as e:
         logger.error(f"Check hidden error: {e}")
@@ -413,10 +358,10 @@ def _notify_owner(owner_id: int, query: str):
     try:
         safe_send_message(
             owner_id,
-            f"🛡️ *Уведомление о попытке поиска*\n\n"
+            f"🛡️ Уведомление о попытке поиска\n\n"
             f"🔍 Кто-то попытался найти информацию по запросу:\n"
-            f"`{query}`\n\n"
-            f"🛡️ *Ваши данные защищены!*\n"
+            f"{query}\n\n"
+            f"🛡️ Ваши данные защищены!\n"
             f"🔒 Информация не была передана.\n\n"
             f"👁️ @Arhapov"
         )
@@ -1379,6 +1324,8 @@ def hide_data_callback(call):
     user_id = call.from_user.id
     bot.answer_callback_query(call.id)
     
+    user_data = get_user_data(user_id)
+    
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("📱 Отправить контакт", callback_data="send_contact_hide"),
@@ -1388,10 +1335,14 @@ def hide_data_callback(call):
     safe_edit_message(
         call.message.chat.id,
         call.message.message_id,
-        "🔒 *Скрытие данных*\n\n"
-        "📌 *Для подачи заявки нажми кнопку ниже и отправь свой контакт.*\n\n"
-        "Это нужно для идентификации твоего аккаунта.\n\n"
-        "После этого заполни данные для скрытия.",
+        f"🔒 Скрытие данных\n\n"
+        f"👤 Твой аккаунт:\n"
+        f"🆔 ID: {user_id}\n"
+        f"👤 Username: @{user_data['username']}\n"
+        f"📛 Имя: {user_data['first_name']}\n\n"
+        f"📌 Нажми кнопку ниже и отправь свой контакт.\n"
+        f"Это нужно для получения номера телефона.\n\n"
+        f"📝 После этого введи только ФИО для скрытия.",
         reply_markup=markup
     )
 
@@ -1406,7 +1357,7 @@ def send_contact_hide(call):
     
     safe_send_message(
         user_id,
-        "📱 *Нажми кнопку ниже, чтобы отправить свой контакт.*\n\n"
+        "📱 Нажми кнопку ниже, чтобы отправить свой контакт.\n\n"
         "Это нужно для подтверждения твоей личности.",
         reply_markup=markup
     )
@@ -1434,86 +1385,63 @@ def handle_contact(message):
         }
         
         markup = types.ReplyKeyboardRemove()
+        user_data = get_user_data(user_id)
+        
         safe_send_message(
             user_id,
-            "✅ *Контакт получен!*\n\n"
-            "📝 Теперь отправь данные для скрытия в формате:\n\n"
-            "`ФИО: Иванов Иван Иванович`\n"
-            "`ПОЧТА: user@example.com`\n"
-            "`ТЕЛЕФОН: +79991234567`\n"
-            "`USERNAME: username`\n"
-            "`IP: 8.8.8.8`\n"
-            "`ДОМЕН: example.com`\n\n"
-            "📌 Можно отправить не все поля, только то, что хочешь скрыть.",
+            f"✅ Контакт получен!\n\n"
+            f"📱 Номер: {contact.phone_number}\n"
+            f"👤 Username: @{message.from_user.username or 'нет'}\n"
+            f"🆔 ID: {user_id}\n\n"
+            f"📝 Теперь отправь ФИО для скрытия:\n\n"
+            f"Пример: Иванов Иван Иванович",
             reply_markup=markup
         )
-        user_state[user_id] = "awaiting_hide_data_fields"
+        user_state[user_id] = "awaiting_hide_fio"
 
-@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_data_fields")
-def process_hide_data_fields(message):
+@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_fio")
+def process_hide_fio(message):
     user_id = message.from_user.id
-    text = message.text.strip()
+    fio = message.text.strip()
     user_state.pop(user_id, None)
     
-    data = {
-        "phone": None,
-        "email": None,
-        "fio": None,
-        "username_hide": None,
-        "ip": None,
-        "domain": None
-    }
-    
-    lines = text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if ':' in line:
-            key, value = line.split(':', 1)
-            key = key.strip().upper()
-            value = value.strip()
-            if key == 'ФИО':
-                data["fio"] = value
-            elif key == 'ПОЧТА':
-                data["email"] = value
-            elif key == 'ТЕЛЕФОН':
-                data["phone"] = value
-            elif key == 'USERNAME':
-                data["username_hide"] = value
-            elif key == 'IP':
-                data["ip"] = value
-            elif key == 'ДОМЕН':
-                data["domain"] = value
+    # Проверяем, что ФИО корректное
+    if not re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', fio):
+        safe_send_message(
+            user_id,
+            "❌ Некорректное ФИО\n\n"
+            "Формат должен быть: Иванов Иван Иванович\n"
+            "Попробуй ещё раз."
+        )
+        user_state[user_id] = "awaiting_hide_fio"
+        return
     
     contact = user_state.get(f"hide_contact_{user_id}", {})
+    user_data = get_user_data(user_id)
     
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute('''
             INSERT INTO hide_requests (
-                user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                user_id, username, contact_phone, phone, fio, status
+            ) VALUES (?, ?, ?, ?, ?, 'pending')
         ''', (
             user_id,
-            contact.get('username') or message.from_user.username or 'нет',
+            user_data.get('username') or message.from_user.username or 'нет',
             contact.get('phone') or '—',
-            data["phone"], data["email"], data["fio"],
-            data["username_hide"], data["ip"], data["domain"]
+            contact.get('phone') or '—',
+            fio
         ))
         request_id = cur.lastrowid
         conn.commit()
         conn.close()
         
         admin_text = (
-            f"🔔 *Новая заявка на скрытие данных # {request_id}*\n\n"
-            f"👤 Пользователь: @{contact.get('username') or 'нет'} | `{user_id}`\n"
+            f"🔔 Новая заявка на скрытие данных # {request_id}\n\n"
+            f"👤 Пользователь: @{user_data.get('username') or 'нет'} | {user_id}\n"
             f"📱 Контактный телефон: {contact.get('phone') or '—'}\n"
-            f"📱 Телефон: {data['phone'] or '—'}\n"
-            f"📧 Почта: {data['email'] or '—'}\n"
-            f"👤 ФИО: {data['fio'] or '—'}\n"
-            f"🆔 Username: {data['username_hide'] or '—'}\n"
-            f"🌐 IP: {data['ip'] or '—'}\n"
-            f"🌍 Домен: {data['domain'] or '—'}"
+            f"👤 ФИО для скрытия: {fio}"
         )
         
         markup = types.InlineKeyboardMarkup(row_width=2)
@@ -1521,13 +1449,15 @@ def process_hide_data_fields(message):
             types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
             types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
         )
-        safe_send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(ADMIN_ID, admin_text, reply_markup=markup)
         
         safe_send_message(
             user_id,
-            "✅ *Заявка отправлена!*\n\n"
-            "⏳ Ожидай решения администратора.\n"
-            "📨 Уведомление придёт, когда заявка будет рассмотрена."
+            "✅ Заявка отправлена!\n\n"
+            f"📋 ФИО для скрытия: {fio}\n"
+            f"📱 Телефон: {contact.get('phone') or '—'}\n"
+            f"🆔 ID: {user_id}\n\n"
+            f"⏳ Ожидай решения администратора."
         )
     except Exception as e:
         safe_send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
@@ -1545,21 +1475,19 @@ def approve_hide(call):
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute('''
-            SELECT user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain 
-            FROM hide_requests WHERE id = ?
+            SELECT user_id, username, phone, fio FROM hide_requests WHERE id = ?
         ''', (request_id,))
         row = cur.fetchone()
         if not row:
             safe_send_message(ADMIN_ID, "❌ Заявка не найдена.")
             return
         
-        user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain = row
+        user_id, username, phone, fio = row
         
         cur.execute('''
-            INSERT OR REPLACE INTO hidden_data (
-                user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain))
+            INSERT OR REPLACE INTO hidden_data (user_id, username, phone, fio)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, phone, fio))
         
         cur.execute("UPDATE hide_requests SET status = 'approved', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
         conn.commit()
@@ -1567,15 +1495,11 @@ def approve_hide(call):
         
         safe_send_message(
             user_id,
-            "✅ *Ваша заявка на скрытие данных ОДОБРЕНА!*\n\n"
-            "🔒 Ваши данные теперь скрыты от поиска.\n\n"
-            "📋 Скрытые данные:\n"
-            f"• Телефон: {phone or '—'}\n"
-            f"• Email: {email or '—'}\n"
-            f"• ФИО: {fio or '—'}\n"
-            f"• Username: {username_hide or '—'}\n"
-            f"• IP: {ip or '—'}\n"
-            f"• Домен: {domain or '—'}"
+            "✅ Ваша заявка на скрытие данных ОДОБРЕНА!\n\n"
+            f"🔒 Теперь эти данные скрыты от поиска:\n"
+            f"📱 Телефон: {phone or '—'}\n"
+            f"👤 ФИО: {fio}\n"
+            f"🆔 ID: {user_id}"
         )
         safe_send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
     except Exception as e:
@@ -1601,7 +1525,7 @@ def reject_hide(call):
             conn.commit()
             safe_send_message(
                 user_id,
-                "❌ *Ваша заявка на скрытие данных ОТКЛОНЕНА*\n\n"
+                "❌ Ваша заявка на скрытие данных ОТКЛОНЕНА\n\n"
                 "📌 Возможно, данные не соответствуют требованиям.\n"
                 "🔄 Попробуй отправить заявку ещё раз с корректными данными."
             )
@@ -1621,21 +1545,20 @@ def list_hide_requests(call):
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT id, user_id, username, phone, email, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
         rows = cur.fetchall()
         conn.close()
         
         if not rows:
-            safe_send_message(ADMIN_ID, "📋 *Нет активных заявок.*")
+            safe_send_message(ADMIN_ID, "📋 Нет активных заявок.")
             return
         
-        text = "📋 *Заявки на скрытие данных*\n\n"
+        text = "📋 Заявки на скрытие данных\n\n"
         for row in rows[:10]:
-            req_id, user_id, username, phone, email, fio, created = row
+            req_id, user_id, username, phone, fio, created = row
             text += (
-                f"🔹 *#{req_id}* | @{username or 'нет'} | `{user_id}`\n"
-                f"   📱 {phone or '—'} | 📧 {email or '—'}\n"
-                f"   👤 {fio or '—'}\n"
+                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
+                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
                 f"   🕐 {created[:16]}\n\n"
             )
         
@@ -1648,7 +1571,7 @@ def list_hide_requests(call):
             )
         markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
         
-        safe_send_message(ADMIN_ID, text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(ADMIN_ID, text, reply_markup=markup)
     except Exception as e:
         safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
 
@@ -1661,20 +1584,20 @@ def admin_help_command(message):
         return
     
     help_text = (
-        "👑 *Админ-команды Глаз Исиды*\n\n"
-        "📌 *Управление пользователями*\n"
-        "`/give <кол-во> <user_id>` — выдать запросы\n"
-        "`/take <кол-во> <user_id>` — забрать запросы\n"
-        "`/users` — список пользователей\n"
-        "`/hide <user_id>` — раскрыть скрытые данные\n\n"
-        "📌 *Управление ботом*\n"
-        "`/tech on/off` — техперерыв\n"
-        "`/stats` — статистика бота\n"
-        "`/broadcast <текст>` — рассылка\n\n"
-        "📌 *Скрытие данных*\n"
-        "`/requests` — список заявок на скрытие\n"
-        "`/hide <user_id>` — раскрыть данные\n\n"
-        "👁️ *Глаз Исиды — OSINT*\n"
+        "👑 Админ-команды Глаз Исиды\n\n"
+        "📌 Управление пользователями\n"
+        "/give <кол-во> <user_id> — выдать запросы\n"
+        "/take <кол-во> <user_id> — забрать запросы\n"
+        "/users — список пользователей\n"
+        "/hide <user_id> — раскрыть скрытые данные\n\n"
+        "📌 Управление ботом\n"
+        "/tech on/off — техперерыв\n"
+        "/stats — статистика бота\n"
+        "/broadcast <текст> — рассылка\n\n"
+        "📌 Скрытие данных\n"
+        "/requests — список заявок на скрытие\n"
+        "/hide <user_id> — раскрыть данные\n\n"
+        "👁️ Глаз Исиды — OSINT\n"
         "🛡️ @Arhapov"
     )
     safe_send_message(message.chat.id, help_text)
@@ -1691,10 +1614,10 @@ def tech_command(message):
         return
     if args[1].lower() == "on":
         TECH_MODE = True
-        safe_send_message(message.chat.id, "🔧 *Техперерыв ВКЛЮЧЁН*")
+        safe_send_message(message.chat.id, "🔧 Техперерыв ВКЛЮЧЁН")
     elif args[1].lower() == "off":
         TECH_MODE = False
-        safe_send_message(message.chat.id, "✅ *Техперерыв ВЫКЛЮЧЕН*")
+        safe_send_message(message.chat.id, "✅ Техперерыв ВЫКЛЮЧЕН")
     else:
         safe_send_message(message.chat.id, "❗ /tech on или /tech off")
 
@@ -1715,10 +1638,10 @@ def stats_command(message):
         conn.close()
         safe_send_message(
             message.chat.id,
-            f"📊 *Статистика бота*\n\n"
-            f"👥 Всего пользователей: **{total_users}**\n"
-            f"🔍 Всего поисков: **{total_searches}**\n"
-            f"📋 Заявок на скрытие: **{pending_requests}**\n"
+            f"📊 Статистика бота\n\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"🔍 Всего поисков: {total_searches}\n"
+            f"📋 Заявок на скрытие: {pending_requests}\n"
             f"👑 Админ: @Arhapov"
         )
     except Exception as e:
@@ -1742,12 +1665,12 @@ def broadcast_command(message):
         sent = 0
         for user in users:
             try:
-                safe_send_message(user[0], f"📢 *Рассылка*\n\n{text}")
+                safe_send_message(user[0], f"📢 Рассылка\n\n{text}")
                 sent += 1
                 time.sleep(0.05)
             except:
                 continue
-        safe_send_message(message.chat.id, f"✅ Рассылка отправлена **{sent}** пользователям.")
+        safe_send_message(message.chat.id, f"✅ Рассылка отправлена {sent} пользователям.")
     except Exception as e:
         safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
@@ -1759,19 +1682,18 @@ def requests_command(message):
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT id, user_id, username, phone, email, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
         rows = cur.fetchall()
         conn.close()
         if not rows:
-            safe_send_message(message.chat.id, "📋 *Нет активных заявок.*")
+            safe_send_message(message.chat.id, "📋 Нет активных заявок.")
             return
-        text = "📋 *Заявки на скрытие данных*\n\n"
+        text = "📋 Заявки на скрытие данных\n\n"
         for row in rows[:10]:
-            req_id, user_id, username, phone, email, fio, created = row
+            req_id, user_id, username, phone, fio, created = row
             text += (
-                f"🔹 *#{req_id}* | @{username or 'нет'} | `{user_id}`\n"
-                f"   📱 {phone or '—'} | 📧 {email or '—'}\n"
-                f"   👤 {fio or '—'}\n"
+                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
+                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
                 f"   🕐 {created[:16]}\n\n"
             )
         markup = types.InlineKeyboardMarkup()
@@ -1782,7 +1704,7 @@ def requests_command(message):
                 types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
             )
         markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
-        safe_send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(message.chat.id, text, reply_markup=markup)
     except Exception as e:
         safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
@@ -1804,7 +1726,7 @@ def hide_command(message):
         conn.close()
         safe_send_message(
             message.chat.id,
-            f"✅ Данные пользователя `{target_id}` раскрыты.\n\n🔓 Теперь его данные снова видны в поиске."
+            f"✅ Данные пользователя {target_id} раскрыты.\n\n🔓 Теперь его данные снова видны в поиске."
         )
     except Exception as e:
         safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
@@ -1824,7 +1746,7 @@ def give_command(message):
         user = get_user(target_id)
         user["searches_today"] = max(0, user["searches_today"] - amount)
         update_user(target_id, user)
-        safe_send_message(message.chat.id, f"✅ Выдано {amount} запросов пользователю `{target_id}`.")
+        safe_send_message(message.chat.id, f"✅ Выдано {amount} запросов пользователю {target_id}.")
     except:
         safe_send_message(message.chat.id, "⚠️ Ошибка. /give <кол-во> <user_id>")
 
@@ -1843,7 +1765,7 @@ def take_command(message):
         user = get_user(target_id)
         user["searches_extra"] = max(0, user["searches_extra"] - amount)
         update_user(target_id, user)
-        safe_send_message(message.chat.id, f"✅ Забрано {amount} запросов у пользователя `{target_id}`.")
+        safe_send_message(message.chat.id, f"✅ Забрано {amount} запросов у пользователя {target_id}.")
     except:
         safe_send_message(message.chat.id, "⚠️ Ошибка. /take <кол-во> <user_id>")
 
@@ -1861,10 +1783,10 @@ def users_command(message):
         if not rows:
             safe_send_message(message.chat.id, "📊 Нет пользователей.")
             return
-        text = "📊 *Список пользователей*\n\n"
+        text = "📊 Список пользователей\n\n"
         for user_id, username, today, extra in rows[:20]:
             total = (5 - today) + extra
-            text += f"• `{user_id}` — @{username or 'нет'} | запросов: {total}\n"
+            text += f"• {user_id} — @{username or 'нет'} | запросов: {total}\n"
         safe_send_message(message.chat.id, text)
     except Exception as e:
         safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
@@ -1915,10 +1837,10 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "👁️ *Глаз Исиды — OSINT*\n\n"
-                "🕵️ *Глубокий OSINT-поиск*\n"
+                "👁️ Глаз Исиды — OSINT\n\n"
+                "🕵️ Глубокий OSINT-поиск\n"
                 "45+ источников\n\n"
-                "⚡ *Выбери действие:*",
+                "⚡ Выбери действие:",
                 reply_markup=main_menu_keyboard()
             )
             return
@@ -1928,8 +1850,8 @@ def callback_handler(call):
             user_data = get_user(user.id, user.username or "Unknown")
             remaining = get_remaining(user.id)
             text = (
-                "👤 *Твой профиль*\n\n"
-                f"🆔 ID: `{user.id}`\n"
+                "👤 Твой профиль\n\n"
+                f"🆔 ID: {user.id}\n"
                 f"👤 Username: @{user.username or 'нет'}\n"
                 f"📛 Имя: {user.first_name or '—'}\n\n"
                 f"📊 Использовано: {user_data['searches_today']}/5\n"
@@ -1954,7 +1876,7 @@ def callback_handler(call):
             used = get_user(user_id)["searches_today"]
             extra = get_user(user_id)["searches_extra"]
             text = (
-                "📊 *Твой баланс*\n\n"
+                "📊 Твой баланс\n\n"
                 f"🔍 Использовано: {used}/5\n"
                 f"📊 Бонусных: {extra}\n"
                 f"📊 Осталось: {remaining}\n"
@@ -1975,13 +1897,13 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "❓ *Помощь*\n\n"
-                "📌 *Как пользоваться:*\n"
+                "❓ Помощь\n\n"
+                "📌 Как пользоваться:\n"
                 "• Отправь номер, email, никнейм, IP или домен\n\n"
-                "🧅 *Даркнет:* Ahmia · Exonera Tor · IntelX\n\n"
-                "📊 *Лимит:* 5 поисков в день\n"
-                "👑 *Админ:* безлимитный доступ\n"
-                "🔒 *Скрытие данных:* отправь заявку админу\n\n"
+                "🧅 Даркнет: Ahmia · Exonera Tor · IntelX\n\n"
+                "📊 Лимит: 5 поисков в день\n"
+                "👑 Админ: безлимитный доступ\n"
+                "🔒 Скрытие данных: отправь заявку админу\n\n"
                 "🛡️ @Arhapov",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
@@ -1993,15 +1915,15 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "🌐 *ГЛОБАЛЬНЫЙ ПОИСК*\n\n"
+                "🌐 ГЛОБАЛЬНЫЙ ПОИСК\n\n"
                 "Отправь запрос для поиска:\n"
-                "• 📱 Номер: `+79991234567`\n"
-                "• 👤 ФИО: `Иванов Иван Иванович`\n"
-                "• 📧 Email: `user@example.com`\n"
-                "• 🆔 Никнейм: `username`\n"
-                "• 🌐 IP: `8.8.8.8`\n"
-                "• 🌍 Домен: `example.com`\n\n"
-                "⚡ *45+ OSINT-источников*\n"
+                "• 📱 Номер: +79991234567\n"
+                "• 👤 ФИО: Иванов Иван Иванович\n"
+                "• 📧 Email: user@example.com\n"
+                "• 🆔 Никнейм: username\n"
+                "• 🌐 IP: 8.8.8.8\n"
+                "• 🌍 Домен: example.com\n\n"
+                "⚡ 45+ OSINT-источников\n"
                 "🧅 Даркнет: Ahmia · Exonera Tor · IntelX",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
@@ -2013,9 +1935,9 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "📱 *ПРОВЕРКА ТЕЛЕФОНА*\n\n"
+                "📱 ПРОВЕРКА ТЕЛЕФОНА\n\n"
                 "Отправь номер для проверки.\n\n"
-                "Пример: `+79991234567`\n\n"
+                "Пример: +79991234567\n\n"
                 "🔍 ФИО · Адреса · Утечки · Соцсети",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
@@ -2027,9 +1949,9 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "📧 *ПРОВЕРКА EMAIL*\n\n"
+                "📧 ПРОВЕРКА EMAIL\n\n"
                 "Отправь email для проверки.\n\n"
-                "Пример: `user@example.com`\n\n"
+                "Пример: user@example.com\n\n"
                 "🔍 Утечки · Репутация · Компания",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
@@ -2041,9 +1963,9 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "👤 *ПОИСК ПО USERNAME*\n\n"
+                "👤 ПОИСК ПО USERNAME\n\n"
                 "Отправь никнейм для поиска.\n\n"
-                "Пример: `username`\n\n"
+                "Пример: username\n\n"
                 "🔍 GitHub · Telegram · Соцсети · Утечки",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
@@ -2055,10 +1977,10 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "🌐 *ПОИСК ПО IP/ДОМЕНУ*\n\n"
+                "🌐 ПОИСК ПО IP/ДОМЕНУ\n\n"
                 "Отправь IP или домен.\n\n"
-                "Пример IP: `8.8.8.8`\n"
-                "Пример домена: `example.com`\n\n"
+                "Пример IP: 8.8.8.8\n"
+                "Пример домена: example.com\n\n"
                 "🔍 Геолокация · WHOIS · SSL · DNS · CMS",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
@@ -2070,10 +1992,10 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "🌍 *ГЕОИНТ*\n\n"
+                "🌍 ГЕОИНТ\n\n"
                 "Отправь координаты или адрес.\n\n"
-                "Пример координат: `55.7558,37.6173`\n"
-                "Пример адреса: `Москва, Кремль`",
+                "Пример координат: 55.7558,37.6173\n"
+                "Пример адреса: Москва, Кремль",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2084,9 +2006,9 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "🖼️ *МЕТАДАННЫЕ ФОТО*\n\n"
+                "🖼️ МЕТАДАННЫЕ ФОТО\n\n"
                 "Отправь ссылку на фото для извлечения EXIF-данных.\n\n"
-                "Пример: `https://example.com/photo.jpg`",
+                "Пример: https://example.com/photo.jpg",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2097,9 +2019,9 @@ def callback_handler(call):
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
-                "📱 *ПОИСК ПО TELEGRAM*\n\n"
+                "📱 ПОИСК ПО TELEGRAM\n\n"
                 "Отправь username Telegram аккаунта.\n\n"
-                "Пример: `@durov`",
+                "Пример: @durov",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 )
@@ -2121,13 +2043,13 @@ def start_command(message):
         remaining = get_remaining(message.from_user.id)
         safe_send_message(
             message.chat.id,
-            f"👁️ *Глаз Исиды — OSINT*\n\n"
+            f"👁️ Глаз Исиды — OSINT\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
             f"⚡ Глубокий OSINT-поиск\n"
             f"🛡️ 45+ источников\n"
             f"🧅 Даркнет: Ahmia · Exonera · IntelX\n\n"
-            f"📊 *Осталось:* {remaining}/5\n\n"
-            f"📌 *Выбери действие:*",
+            f"📊 Осталось: {remaining}/5\n\n"
+            f"📌 Выбери действие:",
             reply_markup=main_menu_keyboard()
         )
     except Exception as e:
@@ -2145,7 +2067,7 @@ def handle_text(message):
         if TECH_MODE and message.from_user.id != ADMIN_ID:
             safe_send_message(
                 message.chat.id,
-                "🔧 *Бот на техническом обслуживании*\n\n⏰ Вернёмся через несколько минут!"
+                "🔧 Бот на техническом обслуживании\n\n⏰ Вернёмся через несколько минут!"
             )
             return
         
@@ -2155,7 +2077,7 @@ def handle_text(message):
         if not can_search(user_id):
             safe_send_message(
                 chat_id,
-                "❌ *Лимит поисков исчерпан!*\n\n⏰ Сброс в 00:00 МСК"
+                "❌ Лимит поисков исчерпан!\n\n⏰ Сброс в 00:00 МСК"
             )
             return
         
@@ -2163,7 +2085,7 @@ def handle_text(message):
         if check_hidden_data(text):
             safe_send_message(
                 chat_id,
-                "🔒 *Человек скрыл свои данные*\n\n"
+                "🔒 Человек скрыл свои данные\n\n"
                 "Данные этого пользователя скрыты по его запросу.\n\n"
                 "🛡️ @Arhapov"
             )
@@ -2173,7 +2095,7 @@ def handle_text(message):
         start_time = time.time()
         msg = safe_send_message(
             chat_id,
-            "👁️ *Глаз Исиды — глубокое сканирование...*\n"
+            "👁️ Глаз Исиды — глубокое сканирование...\n"
             "⏱️ Время: до 120 секунд\n"
             "🕵️ 45+ источников...\n"
             "🧅 Поиск в даркнете..."
@@ -2190,7 +2112,7 @@ def handle_text(message):
                 safe_edit_message(
                     chat_id,
                     msg.message_id,
-                    "⚠️ *Поиск прерван по таймауту (120 секунд)*\n\n"
+                    "⚠️ Поиск прерван по таймауту (120 секунд)\n\n"
                     "📌 Показаны только быстрые результаты."
                 )
                 data = {"query": text, "type": "unknown", "sources": {}, "total_results": 0}
@@ -2220,11 +2142,11 @@ def handle_text(message):
         
         with open(filename, "rb") as f:
             caption = (
-                f"👁️ *OSINT-ОТЧЁТ*\n\n"
-                f"🔍 Запрос: `{text}`\n"
-                f"📌 Найдено: **{total}**\n"
-                f"🔍 Осталось: **{remaining}/5**\n"
-                f"⏱️ Время: **{elapsed:.1f} сек**\n"
+                f"👁️ OSINT-ОТЧЁТ\n\n"
+                f"🔍 Запрос: {text}\n"
+                f"📌 Найдено: {total}\n"
+                f"🔍 Осталось: {remaining}/5\n"
+                f"⏱️ Время: {elapsed:.1f} сек\n"
                 f"🧅 Даркнет: Ahmia · Exonera Tor · IntelX\n"
                 f"🛡️ @Arhapov"
             )
@@ -2235,7 +2157,7 @@ def handle_text(message):
                 chat_id,
                 f,
                 caption=caption,
-                parse_mode="Markdown"
+                parse_mode=None
             )
         
         os.remove(filename)

@@ -51,6 +51,21 @@ if not TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def safe_send_message(chat_id, text, parse_mode="Markdown", reply_markup=None, max_length=4000):
+    """Безопасная отправка сообщения с обрезкой и fallback"""
+    try:
+        if len(text) > max_length:
+            text = text[:max_length] + "...\n\n⚠️ Сообщение обрезано"
+        return bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        error_msg = str(e)
+        if "can't parse" in error_msg or "parse" in error_msg:
+            logger.warning(f"Markdown error, sending without formatting: {error_msg}")
+            return bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
+        if "message is too long" in error_msg:
+            return bot.send_message(chat_id, text[:2000] + "...\n\n⚠️ Сообщение обрезано", parse_mode=None, reply_markup=reply_markup)
+        raise e
+
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -291,10 +306,7 @@ def detect_query_type(query: str) -> str:
     return "text"
 
 def check_hidden_data(query: str) -> bool:
-    """
-    Универсальная проверка скрытых данных.
-    Проверяет ЛЮБЫЕ форматы: номера, email, ФИО, username, IP, домены.
-    """
+    """Универсальная проверка скрытых данных. Проверяет ЛЮБЫЕ форматы."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -303,37 +315,22 @@ def check_hidden_data(query: str) -> bool:
         ''')
         hidden_rows = cur.fetchall()
         conn.close()
-        
         if not hidden_rows:
             return False
         
-        # Генерируем ВСЕ возможные варианты запроса
         variants = []
-        
-        # 1. Исходный запрос (как есть)
         variants.append(query)
-        
-        # 2. Запрос в нижнем регистре
         variants.append(query.lower())
-        
-        # 3. Запрос без пробелов
         variants.append(''.join(query.split()))
         variants.append(''.join(query.lower().split()))
         
-        # 4. Если это номер телефона — генерируем все форматы
         clean = re.sub(r'[\s\-()+]', '', query)
         clean = re.sub(r'^\+', '', clean)
-        
         if clean.isdigit() and len(clean) >= 10:
-            # Варианты номера
-            variants.append(clean)                     # 79991234567
-            variants.append('+' + clean)               # +79991234567
-            variants.append('8' + clean[1:])           # 89991234567
-            variants.append('+8' + clean[1:])          # +89991234567
-            variants.append('7' + clean[1:])           # 79991234567 (уже есть)
-            variants.append('+7' + clean[1:])          # +79991234567 (уже есть)
-            
-            # Если номер начинается с 8
+            variants.append(clean)
+            variants.append('+' + clean)
+            variants.append('8' + clean[1:])
+            variants.append('+8' + clean[1:])
             if clean.startswith('8'):
                 variants.append('7' + clean[1:])
                 variants.append('+7' + clean[1:])
@@ -341,93 +338,53 @@ def check_hidden_data(query: str) -> bool:
                 variants.append('8' + clean[1:])
                 variants.append('+8' + clean[1:])
         
-        # 5. Для email, username, домена — пробуем с @ и без
         if '@' in query:
             variants.append(query.lower())
             variants.append(query.replace('@', ''))
-        else:
-            variants.append(query + '@')
         
-        # 6. Для ФИО — пробуем разные варианты написания
         if len(query.split()) >= 2:
             parts = query.split()
-            # Все варианты перестановок
             for i in range(len(parts)):
                 for j in range(len(parts)):
                     if i != j:
                         variants.append(' '.join([parts[i], parts[j]]))
-            # Сокращения
             if len(parts) >= 2:
                 variants.append(parts[0][0] + '. ' + parts[1])
-                variants.append(parts[0][0] + '. ' + parts[1] + ' ' + (parts[2][0] + '.' if len(parts) > 2 else ''))
         
-        # 7. Для IP — убираем пробелы
         if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', query):
             variants.append(query.strip())
         
-        # Убираем дубликаты
         variants = list(set(variants))
         
-        # Проверяем все варианты
         for row in hidden_rows:
             phone, email, fio, username_hide, ip, domain = row
-            
             for v in variants:
                 v = v.strip()
                 if not v:
                     continue
-                
-                # Телефон
                 if phone:
                     phone_clean = re.sub(r'[\s\-()+]', '', phone)
                     phone_clean = re.sub(r'^\+', '', phone_clean)
-                    phone_variants = [
-                        phone,
-                        phone_clean,
-                        '+' + phone_clean,
-                        '8' + phone_clean[1:],
-                        '+8' + phone_clean[1:],
-                        '7' + phone_clean[1:],
-                        '+7' + phone_clean[1:]
-                    ]
+                    phone_variants = [phone, phone_clean, '+' + phone_clean, '8' + phone_clean[1:], '+8' + phone_clean[1:], '7' + phone_clean[1:], '+7' + phone_clean[1:]]
                     if v in phone_variants:
                         return True
-                
-                # Email (нижний регистр)
-                if email and v == email.lower():
+                if email and (v == email.lower() or v == email.lower().replace('@', '')):
                     return True
-                if email and v == email.lower().replace('@', ''):
-                    return True
-                
-                # ФИО (нижний регистр, без лишних пробелов)
                 if fio:
                     fio_clean = ' '.join(fio.lower().split())
                     v_clean = ' '.join(v.lower().split())
                     if v_clean == fio_clean:
                         return True
-                    # Сокращения
                     fio_parts = fio_clean.split()
                     v_parts = v_clean.split()
                     if len(fio_parts) >= 2 and len(v_parts) >= 2:
                         if fio_parts[0][0] == v_parts[0][0] and fio_parts[1] == v_parts[1]:
                             return True
-                
-                # Username (нижний регистр)
-                if username_hide and v == username_hide.lower():
+                if username_hide and (v == username_hide.lower() or v == username_hide.lower().replace('@', '')):
                     return True
-                if username_hide and v == username_hide.lower().replace('@', ''):
-                    return True
-                
-                # IP
                 if ip and v == ip.strip():
                     return True
-                
-                # Домен (нижний регистр)
-                if domain and v == domain.lower():
-                    return True
-                if domain and v == domain.lower().replace('www.', ''):
-                    return True
-                if domain and v == 'www.' + domain.lower():
+                if domain and (v == domain.lower() or v == domain.lower().replace('www.', '') or v == 'www.' + domain.lower()):
                     return True
         return False
     except Exception as e:
@@ -1195,21 +1152,6 @@ async def global_lookup(query: str) -> dict:
     query = query.strip()
     qtype = detect_query_type(query)
     
-    # ====== ПРОВЕРКА СКРЫТЫХ ДАННЫХ ======
-    if check_hidden_data(query, qtype):
-        return {
-            "query": query,
-            "type": qtype,
-            "sources": {
-                "hidden": {
-                    "found": True,
-                    "message": "🔒 *Человек скрыл свои данные*\n\nДанные этого пользователя скрыты по его запросу.",
-                    "hidden": True
-                }
-            },
-            "total_results": 1
-        }
-    
     result = {
         "query": query,
         "type": qtype,
@@ -1678,7 +1620,6 @@ def process_hide_data_fields(message):
     text = message.text.strip()
     user_state.pop(user_id, None)
     
-    # Парсим поля
     data = {
         "phone": None,
         "email": None,
@@ -1708,7 +1649,6 @@ def process_hide_data_fields(message):
             elif key == 'ДОМЕН':
                 data["domain"] = value
     
-    # Получаем контакт
     contact = user_state.get(f"hide_contact_{user_id}", {})
     
     try:
@@ -2361,7 +2301,7 @@ def callback_handler(call):
 def start_command(message):
     try:
         remaining = get_remaining(message.from_user.id)
-        bot.send_message(
+        safe_send_message(
             message.chat.id,
             f"👁️ *Глаз Исиды — OSINT*\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
@@ -2369,9 +2309,7 @@ def start_command(message):
             f"🛡️ 45+ источников\n"
             f"🧅 Даркнет: Ahmia · Exonera · IntelX\n\n"
             f"📊 *Осталось:* {remaining}/5\n\n"
-            f"📌 *Выбери действие:*",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
+            f"📌 *Выбери действие:*"
         )
     except Exception as e:
         logger.error(f"Start error: {e}")
@@ -2386,36 +2324,40 @@ def handle_text(message):
             return
         
         if TECH_MODE and message.from_user.id != ADMIN_ID:
-            bot.reply_to(message, "🔧 *Бот на техническом обслуживании*\n\n⏰ Вернёмся через несколько минут!", parse_mode="Markdown")
+            safe_send_message(
+                message.chat.id,
+                "🔧 *Бот на техническом обслуживании*\n\n⏰ Вернёмся через несколько минут!"
+            )
             return
         
         user_id = message.from_user.id
         chat_id = message.chat.id
         
         if not can_search(user_id):
-            bot.reply_to(message, "❌ *Лимит поисков исчерпан!*\n\n⏰ Сброс в 00:00 МСК", parse_mode="Markdown")
+            safe_send_message(
+                chat_id,
+                "❌ *Лимит поисков исчерпан!*\n\n⏰ Сброс в 00:00 МСК"
+            )
             return
         
         # ====== УНИВЕРСАЛЬНАЯ ПРОВЕРКА СКРЫТЫХ ДАННЫХ ======
         if check_hidden_data(text):
-            bot.reply_to(
-                message,
+            safe_send_message(
+                chat_id,
                 "🔒 *Человек скрыл свои данные*\n\n"
                 "Данные этого пользователя скрыты по его запросу.\n\n"
-                "🛡️ @Arhapov",
-                parse_mode="Markdown"
+                "🛡️ @Arhapov"
             )
             return
         # =====================================================
         
         start_time = time.time()
-        msg = bot.reply_to(
-            message,
+        msg = safe_send_message(
+            chat_id,
             "👁️ *Глаз Исиды — глубокое сканирование...*\n"
             "⏱️ Время: до 90 секунд\n"
             "🕵️ 45+ источников...\n"
-            "🧅 Поиск в даркнете...",
-            parse_mode="Markdown"
+            "🧅 Поиск в даркнете..."
         )
         
         try:
@@ -2459,16 +2401,22 @@ def handle_text(message):
             f.write(html)
         
         with open(filename, "rb") as f:
+            caption = (
+                f"👁️ *OSINT-ОТЧЁТ*\n\n"
+                f"🔍 Запрос: `{text}`\n"
+                f"📌 Найдено: **{total}**\n"
+                f"🔍 Осталось: **{remaining}/5**\n"
+                f"⏱️ Время: **{elapsed:.1f} сек**\n"
+                f"🧅 Даркнет: Ahmia · Exonera Tor · IntelX\n"
+                f"🛡️ @Arhapov"
+            )
+            if len(caption) > 1000:
+                caption = caption[:997] + "..."
+            
             bot.send_document(
                 chat_id,
                 f,
-                caption=f"👁️ *OSINT-ОТЧЁТ*\n\n"
-                        f"🔍 Запрос: `{text}`\n"
-                        f"📌 Найдено: **{total}**\n"
-                        f"🔍 Осталось: **{remaining}/5**\n"
-                        f"⏱️ Время: **{elapsed:.1f} сек**\n"
-                        f"🧅 Даркнет: Ahmia · Exonera Tor · IntelX\n"
-                        f"🛡️ @Arhapov",
+                caption=caption,
                 parse_mode="Markdown"
             )
         
@@ -2478,7 +2426,10 @@ def handle_text(message):
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
         try:
-            bot.send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+            bot.send_message(
+                message.chat.id,
+                f"⚠️ Ошибка: {str(e)[:100]}"
+            )
         except:
             pass
 

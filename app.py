@@ -306,12 +306,12 @@ def detect_query_type(query: str) -> str:
     return "text"
 
 def check_hidden_data(query: str) -> bool:
-    """Универсальная проверка скрытых данных. Проверяет ЛЮБЫЕ форматы."""
+    """Универсальная проверка скрытых данных с уведомлением владельца"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute('''
-            SELECT phone, email, fio, username_hide, ip, domain FROM hidden_data
+            SELECT user_id, phone, email, fio, username_hide, ip, domain FROM hidden_data
         ''')
         hidden_rows = cur.fetchall()
         conn.close()
@@ -357,7 +357,7 @@ def check_hidden_data(query: str) -> bool:
         variants = list(set(variants))
         
         for row in hidden_rows:
-            phone, email, fio, username_hide, ip, domain = row
+            owner_id, phone, email, fio, username_hide, ip, domain = row
             for v in variants:
                 v = v.strip()
                 if not v:
@@ -367,29 +367,52 @@ def check_hidden_data(query: str) -> bool:
                     phone_clean = re.sub(r'^\+', '', phone_clean)
                     phone_variants = [phone, phone_clean, '+' + phone_clean, '8' + phone_clean[1:], '+8' + phone_clean[1:], '7' + phone_clean[1:], '+7' + phone_clean[1:]]
                     if v in phone_variants:
+                        _notify_owner(owner_id, query)
                         return True
                 if email and (v == email.lower() or v == email.lower().replace('@', '')):
+                    _notify_owner(owner_id, query)
                     return True
                 if fio:
                     fio_clean = ' '.join(fio.lower().split())
                     v_clean = ' '.join(v.lower().split())
                     if v_clean == fio_clean:
+                        _notify_owner(owner_id, query)
                         return True
                     fio_parts = fio_clean.split()
                     v_parts = v_clean.split()
                     if len(fio_parts) >= 2 and len(v_parts) >= 2:
                         if fio_parts[0][0] == v_parts[0][0] and fio_parts[1] == v_parts[1]:
+                            _notify_owner(owner_id, query)
                             return True
                 if username_hide and (v == username_hide.lower() or v == username_hide.lower().replace('@', '')):
+                    _notify_owner(owner_id, query)
                     return True
                 if ip and v == ip.strip():
+                    _notify_owner(owner_id, query)
                     return True
                 if domain and (v == domain.lower() or v == domain.lower().replace('www.', '') or v == 'www.' + domain.lower()):
+                    _notify_owner(owner_id, query)
                     return True
         return False
     except Exception as e:
         logger.error(f"Check hidden error: {e}")
         return False
+
+def _notify_owner(owner_id: int, query: str):
+    """Отправляет уведомление только владельцу скрытых данных"""
+    try:
+        bot.send_message(
+            owner_id,
+            f"🛡️ *Уведомление о попытке поиска*\n\n"
+            f"🔍 Кто-то попытался найти информацию по запросу:\n"
+            f"`{query}`\n\n"
+            f"🛡️ *Ваши данные защищены!*\n"
+            f"🔒 Информация не была передана.\n\n"
+            f"👁️ @Arhapov",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Notify owner error: {e}")
 
 # ==================== ПАРСЕР С ОБХОДОМ ====================
 
@@ -2311,7 +2334,7 @@ def start_command(message):
             f"📊 *Осталось:* {remaining}/5\n\n"
             f"📌 *Выбери действие:*",
             parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()  # <--- ЭТО ГЛАВНОЕ
+            reply_markup=main_menu_keyboard()
         )
     except Exception as e:
         logger.error(f"Start error: {e}")
@@ -2342,7 +2365,7 @@ def handle_text(message):
             )
             return
         
-        # ====== УНИВЕРСАЛЬНАЯ ПРОВЕРКА СКРЫТЫХ ДАННЫХ ======
+        # ====== ПРОВЕРКА СКРЫТЫХ ДАННЫХ ======
         if check_hidden_data(text):
             safe_send_message(
                 chat_id,
@@ -2351,7 +2374,7 @@ def handle_text(message):
                 "🛡️ @Arhapov"
             )
             return
-        # =====================================================
+        # =====================================
         
         start_time = time.time()
         msg = safe_send_message(

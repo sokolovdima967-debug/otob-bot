@@ -291,34 +291,68 @@ def detect_query_type(query: str) -> str:
     return "text"
 
 def check_hidden_data(query: str, qtype: str) -> bool:
-    """Проверяет, скрыты ли данные этого пользователя"""
+    """Проверяет, скрыты ли данные этого пользователя (с нормализацией номера)"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
+        
+        # Получаем все скрытые записи
         cur.execute('''
             SELECT phone, email, fio, username_hide, ip, domain FROM hidden_data
         ''')
         hidden_rows = cur.fetchall()
         conn.close()
+        
         if not hidden_rows:
             return False
-        normalized_query = query
+        
+        # Нормализуем запрос для проверки
+        variants = [query]
+        
         if qtype == "phone":
-            normalized_query = clean_phone(query)
-            variants = [normalized_query]
-            if normalized_query.startswith('8'):
-                variants.append('7' + normalized_query[1:])
-            elif normalized_query.startswith('7'):
-                variants.append('8' + normalized_query[1:])
-            if not normalized_query.startswith('+'):
-                variants.append('+' + normalized_query)
-        else:
-            variants = [query]
+            # Очищаем номер от лишних символов
+            clean = re.sub(r'[\s\-()+]', '', query)
+            clean = re.sub(r'^\+', '', clean)
+            
+            variants = []
+            variants.append(clean)
+            variants.append('+' + clean)
+            
+            if clean.startswith('7'):
+                variants.append('8' + clean[1:])
+            elif clean.startswith('8'):
+                variants.append('7' + clean[1:])
+            
+            if clean.startswith('8'):
+                variants.append('7' + clean[1:])
+            elif clean.startswith('7'):
+                variants.append('8' + clean[1:])
+            
+            if clean.startswith('7'):
+                variants.append('+7' + clean[1:])
+                variants.append('+8' + clean[1:])
+            elif clean.startswith('8'):
+                variants.append('+8' + clean[1:])
+                variants.append('+7' + clean[1:])
+        
+        # Проверяем все варианты
         for row in hidden_rows:
             phone, email, fio, username_hide, ip, domain = row
             for v in variants:
-                if (phone and v == phone) or (email and v == email) or (fio and v == fio) or \
-                   (username_hide and v == username_hide) or (ip and v == ip) or (domain and v == domain):
+                if phone:
+                    phone_clean = re.sub(r'[\s\-()+]', '', phone)
+                    phone_clean = re.sub(r'^\+', '', phone_clean)
+                    if v == phone or v == phone_clean or v == '+' + phone_clean:
+                        return True
+                if email and v == email:
+                    return True
+                if fio and v == fio:
+                    return True
+                if username_hide and v == username_hide:
+                    return True
+                if ip and v == ip:
+                    return True
+                if domain and v == domain:
                     return True
         return False
     except Exception as e:

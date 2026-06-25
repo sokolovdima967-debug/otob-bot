@@ -295,18 +295,13 @@ def check_hidden_data(query: str, qtype: str) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        
-        # Получаем все скрытые записи
         cur.execute('''
             SELECT phone, email, fio, username_hide, ip, domain FROM hidden_data
         ''')
         hidden_rows = cur.fetchall()
         conn.close()
-        
         if not hidden_rows:
             return False
-        
-        # Нормализуем запрос для проверки
         normalized_query = query
         if qtype == "phone":
             normalized_query = clean_phone(query)
@@ -319,7 +314,6 @@ def check_hidden_data(query: str, qtype: str) -> bool:
                 variants.append('+' + normalized_query)
         else:
             variants = [query]
-        
         for row in hidden_rows:
             phone, email, fio, username_hide, ip, domain = row
             for v in variants:
@@ -784,8 +778,10 @@ async def google_dorks_search(query: str) -> list:
                             text = snippet.get_text(strip=True)[:200]
                             if text and len(text) > 10:
                                 results.append({"title": dork, "text": text, "found": True})
-        except:
-            continue    return results
+        except Exception as e:
+            logger.error(f"Google dorks error: {e}")
+            continue
+    return results
 
 async def dns_enum(domain: str) -> list:
     try:

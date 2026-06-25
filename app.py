@@ -2301,7 +2301,7 @@ def callback_handler(call):
 def start_command(message):
     try:
         remaining = get_remaining(message.from_user.id)
-        safe_send_message(
+        bot.send_message(
             message.chat.id,
             f"👁️ *Глаз Исиды — OSINT*\n\n"
             f"🕵️ Привет, {message.from_user.first_name}!\n"
@@ -2309,7 +2309,9 @@ def start_command(message):
             f"🛡️ 45+ источников\n"
             f"🧅 Даркнет: Ahmia · Exonera · IntelX\n\n"
             f"📊 *Осталось:* {remaining}/5\n\n"
-            f"📌 *Выбери действие:*"
+            f"📌 *Выбери действие:*",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard()  # <--- ЭТО ГЛАВНОЕ
         )
     except Exception as e:
         logger.error(f"Start error: {e}")

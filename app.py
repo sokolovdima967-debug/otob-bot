@@ -32,7 +32,7 @@ DB_PATH = os.path.join("/tmp", "glaz_isidy_bot.db")
 SEARCH_TIMEOUT = 120
 TECH_MODE = False
 user_state = {}
-user_search_mode = {}  # Хранит выбранный режим поиска для пользователя
+user_search_mode = {}
 
 # ===== КЛЮЧИ API =====
 NUMVERIFY_KEY = os.environ.get("NUMVERIFY_KEY")
@@ -396,7 +396,6 @@ def _notify_owner(owner_id: int, query: str):
 # ==================== ФУНКЦИИ ДЛЯ ВЫБОРА РЕЖИМА ПОИСКА ====================
 
 def get_choice_keyboard_for_numbers():
-    """Клавиатура для цифр (номер, ID, IP)"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("📱 Телефон", callback_data="search_phone"),
@@ -409,7 +408,6 @@ def get_choice_keyboard_for_numbers():
     return markup
 
 def get_choice_keyboard_for_text():
-    """Клавиатура для текста (домен, username)"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("🌐 Домен", callback_data="search_domain"),
@@ -420,14 +418,9 @@ def get_choice_keyboard_for_text():
     )
     return markup
 
-# ==================== ФУНКЦИИ ПОИСКА (ДЛЯ РАЗНЫХ ТИПОВ) ====================
-
-async def search_phone_number(query: str) -> dict:
-    """Поиск по номеру телефона"""
-    return await global_lookup(query)
+# ==================== ФУНКЦИИ ПОИСКА ====================
 
 async def search_telegram_id(query: str) -> dict:
-    """Поиск по Telegram ID (только базовая информация)"""
     try:
         user_id = int(query)
         chat = bot.get_chat(user_id)
@@ -460,19 +453,9 @@ async def search_telegram_id(query: str) -> dict:
             "total_results": 0
         }
 
-async def search_ip_address(query: str) -> dict:
-    """Поиск по IP-адресу"""
-    return await global_lookup(query)
-
-async def search_domain(query: str) -> dict:
-    """Поиск по домену"""
-    return await global_lookup(query)
-
 async def search_username(query: str) -> dict:
-    """Поиск по username (только базовые проверки)"""
     try:
         clean = query.replace('@', '').strip()
-        # Проверка в Telegram
         telegram_result = None
         try:
             url = f"https://t.me/{clean}"
@@ -487,7 +470,6 @@ async def search_username(query: str) -> dict:
         except:
             pass
         
-        # DuckDuckGo поиск
         ddg_results = await duckduckgo_search(query)
         
         return {
@@ -509,8 +491,6 @@ async def search_username(query: str) -> dict:
             "sources": {},
             "total_results": 0
         }
-
-# ==================== ФУНКЦИИ ПОИСКА (ОСНОВНЫЕ) ====================
 
 async def phonenumbers_info(phone: str) -> dict:
     try:
@@ -694,7 +674,7 @@ async def google_dorks_search(query: str) -> list:
             continue
     return results
 
-# ==================== ГЛОБАЛЬНЫЙ ПОИСК (БЕЗ USERNAME И TELEGRAM ID) ====================
+# ==================== ГЛОБАЛЬНЫЙ ПОИСК ====================
 
 async def global_lookup(query: str) -> dict:
     query = query.strip()
@@ -711,7 +691,6 @@ async def global_lookup(query: str) -> dict:
     total = 0
     tasks = []
     
-    # Username и Telegram ID НЕ ищутся в глобальном поиске
     if qtype == "username" or qtype == "telegram_id":
         return {
             "query": query,
@@ -783,7 +762,7 @@ async def global_lookup(query: str) -> dict:
     result["total_results"] = total
     return result
 
-# ==================== ПАРСЕР С ОБХОДОМ ====================
+# ==================== ПАРСЕР ====================
 
 async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) -> list:
     headers = {
@@ -1578,75 +1557,72 @@ def users_command(message):
 
 # ==================== ОБРАБОТЧИК ВЫБОРА РЕЖИМА ПОИСКА ====================
 
+def run_search_sync(chat_id, user_id, query, mode):
+    """Синхронный запуск поиска (для callback)"""
+    try:
+        # Создаём новый event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(perform_search(chat_id, user_id, query, mode))
+        finally:
+            loop.close()
+    except Exception as e:
+        logger.error(f"Sync search error: {e}")
+        safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('search_'))
 def search_mode_callback(call):
-    user_id = call.from_user.id
-    query = user_state.get(f"search_query_{user_id}", "")
-    mode = call.data.replace('search_', '')
-    
-    bot.answer_callback_query(call.id, f"🔍 Поиск в режиме: {mode}")
-    
-    # Сохраняем режим поиска
-    user_search_mode[user_id] = mode
-    
-    # Запускаем поиск в зависимости от режима
-    asyncio.run_coroutine_threadsafe(
-        perform_search(call.message.chat.id, user_id, query, mode),
-        asyncio.get_event_loop()
-    )
+    try:
+        user_id = call.from_user.id
+        query = user_state.get(f"search_query_{user_id}", "")
+        mode = call.data.replace('search_', '')
+        
+        bot.answer_callback_query(call.id, f"🔍 Поиск в режиме: {mode}")
+        
+        user_search_mode[user_id] = mode
+        
+        # Запускаем поиск синхронно
+        run_search_sync(call.message.chat.id, user_id, query, mode)
+    except Exception as e:
+        logger.error(f"Search mode error: {e}")
+        safe_send_message(call.message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+# ==================== ФУНКЦИЯ ВЫПОЛНЕНИЯ ПОИСКА ====================
 
 async def perform_search(chat_id, user_id, query, mode):
-    """Выполняет поиск в зависимости от режима"""
     try:
-        # Проверяем лимит
         if not can_search(user_id):
             safe_send_message(chat_id, "❌ Лимит поисков исчерпан!\n\n⏰ Сброс в 00:00 МСК")
             return
         
-        # Определяем тип поиска
         if mode == "global":
-            # Глобальный поиск
             await run_global_search(chat_id, user_id, query)
         elif mode == "phone":
-            # Поиск по номеру телефона
             await run_phone_search(chat_id, user_id, query)
         elif mode == "telegram_id":
-            # Поиск по Telegram ID
             await run_telegram_id_search(chat_id, user_id, query)
         elif mode == "ip":
-            # Поиск по IP
             await run_ip_search(chat_id, user_id, query)
         elif mode == "domain":
-            # Поиск по домену
             await run_domain_search(chat_id, user_id, query)
         elif mode == "username":
-            # Поиск по username
             await run_username_search(chat_id, user_id, query)
         else:
             safe_send_message(chat_id, "❌ Неизвестный режим поиска.")
     except Exception as e:
-        logger.error(f"Search error: {e}")
+        logger.error(f"Perform search error: {e}")
         safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 async def run_global_search(chat_id, user_id, query):
-    """Запускает глобальный поиск"""
     start_time = time.time()
     msg = safe_send_message(chat_id, "👁️ Глаз Исиды — глубокое сканирование...\n⏱️ Время: до 120 секунд\n🕵️ Множество источников...")
     
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            data = await asyncio.wait_for(global_lookup(query), timeout=120)
-        except asyncio.TimeoutError:
-            safe_edit_message(chat_id, msg.message_id, "⚠️ Поиск прерван по таймауту (120 секунд)\n\n📌 Показаны только быстрые результаты.")
-            data = {"query": query, "type": "unknown", "sources": {}, "total_results": 0}
-        finally:
-            loop.close()
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
-        return
+        data = await asyncio.wait_for(global_lookup(query), timeout=120)
+    except asyncio.TimeoutError:
+        safe_edit_message(chat_id, msg.message_id, "⚠️ Поиск прерван по таймауту (120 секунд)\n\n📌 Показаны только быстрые результаты.")
+        data = {"query": query, "type": "unknown", "sources": {}, "total_results": 0}
     
     elapsed = time.time() - start_time
     total = data.get("total_results", 0)
@@ -1654,7 +1630,6 @@ async def run_global_search(chat_id, user_id, query):
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
-    
     reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
     
     filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
@@ -1662,14 +1637,7 @@ async def run_global_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = (
-            f"👁️ OSINT-ОТЧЁТ\n\n"
-            f"🔍 Запрос: {query}\n"
-            f"📌 Найдено: {total}\n"
-            f"🔍 Осталось: {remaining}/5\n"
-            f"⏱️ Время: {elapsed:.1f} сек\n"
-            f"🛡️ @Arhapov"
-        )
+        caption = f"👁️ OSINT-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -1681,7 +1649,6 @@ async def run_global_search(chat_id, user_id, query):
         pass
 
 async def run_phone_search(chat_id, user_id, query):
-    """Запускает поиск по номеру телефона"""
     start_time = time.time()
     msg = safe_send_message(chat_id, "📱 Поиск по номеру телефона...\n⏱️ Время: до 60 секунд")
     
@@ -1697,7 +1664,6 @@ async def run_phone_search(chat_id, user_id, query):
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
-    
     reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
     
     filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
@@ -1705,14 +1671,7 @@ async def run_phone_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = (
-            f"📱 ОТЧЁТ ПО НОМЕРУ\n\n"
-            f"🔍 Запрос: {query}\n"
-            f"📌 Найдено: {total}\n"
-            f"🔍 Осталось: {remaining}/5\n"
-            f"⏱️ Время: {elapsed:.1f} сек\n"
-            f"🛡️ @Arhapov"
-        )
+        caption = f"📱 ОТЧЁТ ПО НОМЕРУ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -1724,7 +1683,6 @@ async def run_phone_search(chat_id, user_id, query):
         pass
 
 async def run_telegram_id_search(chat_id, user_id, query):
-    """Запускает поиск по Telegram ID"""
     msg = safe_send_message(chat_id, "🆔 Поиск по Telegram ID...")
     
     try:
@@ -1737,7 +1695,6 @@ async def run_telegram_id_search(chat_id, user_id, query):
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
-    
     reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
     
     filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
@@ -1745,13 +1702,7 @@ async def run_telegram_id_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = (
-            f"🆔 TELEGRAM ID\n\n"
-            f"🔍 Запрос: {query}\n"
-            f"📌 Найдено: {data.get('total_results', 0)}\n"
-            f"🔍 Осталось: {remaining}/5\n"
-            f"🛡️ @Arhapov"
-        )
+        caption = f"🆔 TELEGRAM ID\n\n🔍 Запрос: {query}\n📌 Найдено: {data.get('total_results', 0)}\n🔍 Осталось: {remaining}/5\n🛡️ @Arhapov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -1763,7 +1714,6 @@ async def run_telegram_id_search(chat_id, user_id, query):
         pass
 
 async def run_ip_search(chat_id, user_id, query):
-    """Запускает поиск по IP"""
     start_time = time.time()
     msg = safe_send_message(chat_id, "🌐 Поиск по IP-адресу...\n⏱️ Время: до 30 секунд")
     
@@ -1779,7 +1729,6 @@ async def run_ip_search(chat_id, user_id, query):
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
-    
     reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
     
     filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
@@ -1787,14 +1736,7 @@ async def run_ip_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = (
-            f"🌐 IP-ОТЧЁТ\n\n"
-            f"🔍 Запрос: {query}\n"
-            f"📌 Найдено: {total}\n"
-            f"🔍 Осталось: {remaining}/5\n"
-            f"⏱️ Время: {elapsed:.1f} сек\n"
-            f"🛡️ @Arhapov"
-        )
+        caption = f"🌐 IP-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -1806,7 +1748,6 @@ async def run_ip_search(chat_id, user_id, query):
         pass
 
 async def run_domain_search(chat_id, user_id, query):
-    """Запускает поиск по домену"""
     start_time = time.time()
     msg = safe_send_message(chat_id, "🌐 Поиск по домену...\n⏱️ Время: до 30 секунд")
     
@@ -1822,7 +1763,6 @@ async def run_domain_search(chat_id, user_id, query):
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
-    
     reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
     
     filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
@@ -1830,14 +1770,7 @@ async def run_domain_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = (
-            f"🌐 ДОМЕН-ОТЧЁТ\n\n"
-            f"🔍 Запрос: {query}\n"
-            f"📌 Найдено: {total}\n"
-            f"🔍 Осталось: {remaining}/5\n"
-            f"⏱️ Время: {elapsed:.1f} сек\n"
-            f"🛡️ @Arhapov"
-        )
+        caption = f"🌐 ДОМЕН-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -1849,7 +1782,6 @@ async def run_domain_search(chat_id, user_id, query):
         pass
 
 async def run_username_search(chat_id, user_id, query):
-    """Запускает поиск по username"""
     msg = safe_send_message(chat_id, "👤 Поиск по username...")
     
     try:
@@ -1862,7 +1794,6 @@ async def run_username_search(chat_id, user_id, query):
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
-    
     reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
     
     filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
@@ -1870,13 +1801,7 @@ async def run_username_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = (
-            f"👤 USERNAME-ОТЧЁТ\n\n"
-            f"🔍 Запрос: {query}\n"
-            f"📌 Найдено: {data.get('total_results', 0)}\n"
-            f"🔍 Осталось: {remaining}/5\n"
-            f"🛡️ @Arhapov"
-        )
+        caption = f"👤 USERNAME-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {data.get('total_results', 0)}\n🔍 Осталось: {remaining}/5\n🛡️ @Arhapov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -1903,42 +1828,25 @@ def handle_text(message):
         user_id = message.from_user.id
         chat_id = message.chat.id
         
-        # Проверяем, есть ли активный режим (из меню)
         if user_search_mode.get(user_id):
             mode = user_search_mode.pop(user_id)
-            # Запускаем поиск в выбранном режиме
-            asyncio.run_coroutine_threadsafe(
-                perform_search(chat_id, user_id, text, mode),
-                asyncio.get_event_loop()
-            )
+            run_search_sync(chat_id, user_id, text, mode)
             return
         
-        # Проверяем скрытые данные
         if check_hidden_data(text):
             safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
             return
         
-        # Определяем, цифры или текст
         is_digits = re.match(r'^[\d\s\-()+.]+$', text)
         
         if is_digits:
-            # Цифры — показываем кнопки для номера, ID, IP
             markup = get_choice_keyboard_for_numbers()
             user_state[f"search_query_{user_id}"] = text
-            safe_send_message(
-                chat_id,
-                "📌 Выберите тип функции для поиска:",
-                reply_markup=markup
-            )
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
         else:
-            # Текст — показываем кнопки для домена, username, глобальный
             markup = get_choice_keyboard_for_text()
             user_state[f"search_query_{user_id}"] = text
-            safe_send_message(
-                chat_id,
-                "📌 Выберите тип функции для поиска:",
-                reply_markup=markup
-            )
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
         
     except Exception as e:
         logger.error(f"Handle text error: {e}")
@@ -2203,6 +2111,11 @@ def callback_handler(call):
 def start_command(message):
     try:
         remaining = get_remaining(message.from_user.id)
+        user_id = message.from_user.id
+        user_state.pop(user_id, None)
+        user_state.pop(f"search_query_{user_id}", None)
+        user_search_mode.pop(user_id, None)
+        
         safe_send_message(
             message.chat.id,
             f"👁️ Глаз Исиды — OSINT\n\n"

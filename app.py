@@ -1795,7 +1795,7 @@ async def run_username_search(chat_id, user_id, query):
 
 # ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК КОЛБЭКОВ ====================
 
-@bot.callback_query_handler(func=lambda call: True, priority=1)
+@bot.callback_query_handler(func=lambda call: True)
 def global_callback_handler(call):
     try:
         # Отвечаем на callback, чтобы убрать "часики"
@@ -2048,13 +2048,18 @@ def global_callback_handler(call):
         except:
             pass
 
-# ==================== ОБРАБОТЧИК ТЕКСТА ====================
+# ==================== ОБРАБОТЧИК ТЕКСТА (ВСЕ СООБЩЕНИЯ) ====================
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     try:
         text = message.text.strip()
-        if not text or text.startswith('/'):
+        
+        # ===== ПРОПУСКАЕМ КОМАНДЫ =====
+        if text.startswith('/'):
+            return
+        
+        if not text:
             return
         
         if TECH_MODE and message.from_user.id != ADMIN_ID:
@@ -2128,6 +2133,7 @@ def main_menu_keyboard():
 @bot.message_handler(commands=['start'])
 def start_command(message):
     try:
+        logger.info(f"Start command from {message.from_user.id}")
         remaining = get_remaining(message.from_user.id)
         user_id = message.from_user.id
         user_state.pop(user_id, None)
@@ -2146,6 +2152,7 @@ def start_command(message):
         )
     except Exception as e:
         logger.error(f"Start error: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 # ==================== ЗАПУСК ====================
 

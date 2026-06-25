@@ -68,10 +68,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS hide_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
+                username TEXT,
+                contact_phone TEXT,
                 phone TEXT,
                 email TEXT,
                 fio TEXT,
-                username TEXT,
+                username_hide TEXT,
                 ip TEXT,
                 domain TEXT,
                 status TEXT DEFAULT 'pending',
@@ -83,10 +85,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS hidden_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
+                username TEXT,
+                contact_phone TEXT,
                 phone TEXT,
                 email TEXT,
                 fio TEXT,
-                username TEXT,
+                username_hide TEXT,
                 ip TEXT,
                 domain TEXT,
                 hidden_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -285,6 +289,47 @@ def detect_query_type(query: str) -> str:
     if "." in query and len(query.split()) == 1:
         return "domain"
     return "text"
+
+def check_hidden_data(query: str, qtype: str) -> bool:
+    """Проверяет, скрыты ли данные этого пользователя"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        
+        # Получаем все скрытые записи
+        cur.execute('''
+            SELECT phone, email, fio, username_hide, ip, domain FROM hidden_data
+        ''')
+        hidden_rows = cur.fetchall()
+        conn.close()
+        
+        if not hidden_rows:
+            return False
+        
+        # Нормализуем запрос для проверки
+        normalized_query = query
+        if qtype == "phone":
+            normalized_query = clean_phone(query)
+            variants = [normalized_query]
+            if normalized_query.startswith('8'):
+                variants.append('7' + normalized_query[1:])
+            elif normalized_query.startswith('7'):
+                variants.append('8' + normalized_query[1:])
+            if not normalized_query.startswith('+'):
+                variants.append('+' + normalized_query)
+        else:
+            variants = [query]
+        
+        for row in hidden_rows:
+            phone, email, fio, username_hide, ip, domain = row
+            for v in variants:
+                if (phone and v == phone) or (email and v == email) or (fio and v == fio) or \
+                   (username_hide and v == username_hide) or (ip and v == ip) or (domain and v == domain):
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"Check hidden error: {e}")
+        return False
 
 # ==================== ПАРСЕР С ОБХОДОМ ====================
 
@@ -740,8 +785,7 @@ async def google_dorks_search(query: str) -> list:
                             if text and len(text) > 10:
                                 results.append({"title": dork, "text": text, "found": True})
         except:
-            continue
-    return results
+            continue    return results
 
 async def dns_enum(domain: str) -> list:
     try:
@@ -1047,30 +1091,19 @@ async def global_lookup(query: str) -> dict:
     qtype = detect_query_type(query)
     
     # ====== ПРОВЕРКА СКРЫТЫХ ДАННЫХ ======
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            SELECT user_id FROM hidden_data 
-            WHERE phone = ? OR email = ? OR fio = ? OR username = ? OR ip = ? OR domain = ?
-        ''', (query, query, query, query, query, query))
-        hidden_row = cur.fetchone()
-        conn.close()
-        if hidden_row:
-            return {
-                "query": query,
-                "type": qtype,
-                "sources": {
-                    "hidden": {
-                        "found": True,
-                        "message": "🔒 *Человек скрыл свои данные*\n\nДанные этого пользователя скрыты по его запросу.",
-                        "hidden": True
-                    }
-                },
-                "total_results": 1
-            }
-    except:
-        pass
+    if check_hidden_data(query, qtype):
+        return {
+            "query": query,
+            "type": qtype,
+            "sources": {
+                "hidden": {
+                    "found": True,
+                    "message": "🔒 *Человек скрыл свои данные*\n\nДанные этого пользователя скрыты по его запросу.",
+                    "hidden": True
+                }
+            },
+            "total_results": 1
+        }
     
     result = {
         "query": query,
@@ -1465,70 +1498,156 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 def hide_data_callback(call):
     user_id = call.from_user.id
     bot.answer_callback_query(call.id)
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📱 Отправить контакт", callback_data="send_contact_hide"),
+        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+    )
+    
     bot.edit_message_text(
         "🔒 *Скрытие данных*\n\n"
-        "📌 Отправь данные для скрытия (через запятую):\n\n"
-        "• Номер телефона\n• Email\n• ФИО\n• Username\n• IP\n• Домен\n\n"
-        "Пример: `+79991234567, user@example.com, Иванов Иван`\n\n"
-        "⏳ После отправки заявка будет рассмотрена админом.",
+        "📌 *Для подачи заявки нажми кнопку ниже и отправь свой контакт.*\n\n"
+        "Это нужно для идентификации твоего аккаунта.\n\n"
+        "После этого заполни данные для скрытия.",
         call.message.chat.id,
         call.message.message_id,
         parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-        )
+        reply_markup=markup
     )
-    user_state[user_id] = "awaiting_hide_data"
 
-@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_data")
-def process_hide_data(message):
+@bot.callback_query_handler(func=lambda call: call.data == "send_contact_hide")
+def send_contact_hide(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    
+    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True, one_time_keyboard=True)
+    contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
+    markup.add(contact_button)
+    
+    bot.send_message(
+        user_id,
+        "📱 *Нажми кнопку ниже, чтобы отправить свой контакт.*\n\n"
+        "Это нужно для подтверждения твоей личности.",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    user_state[user_id] = "awaiting_contact_for_hide"
+
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    user_id = message.from_user.id
+    
+    if user_state.get(user_id) == "awaiting_contact_for_hide":
+        contact = message.contact
+        user_state.pop(user_id, None)
+        
+        user_state[f"hide_contact_{user_id}"] = {
+            "phone": contact.phone_number,
+            "user_id": contact.user_id,
+            "first_name": contact.first_name,
+            "last_name": contact.last_name,
+            "username": message.from_user.username
+        }
+        
+        markup = types.ReplyKeyboardRemove()
+        bot.send_message(
+            user_id,
+            "✅ *Контакт получен!*\n\n"
+            "📝 Теперь отправь данные для скрытия в формате:\n\n"
+            "`ФИО: Иванов Иван Иванович`\n"
+            "`ПОЧТА: user@example.com`\n"
+            "`ТЕЛЕФОН: +79991234567`\n"
+            "`USERNAME: username`\n"
+            "`IP: 8.8.8.8`\n"
+            "`ДОМЕН: example.com`\n\n"
+            "📌 Можно отправить не все поля, только то, что хочешь скрыть.",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        user_state[user_id] = "awaiting_hide_data_fields"
+
+@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_data_fields")
+def process_hide_data_fields(message):
     user_id = message.from_user.id
     text = message.text.strip()
     user_state.pop(user_id, None)
-    items = [x.strip() for x in text.split(',')]
-    data = {"phone": None, "email": None, "fio": None, "username": None, "ip": None, "domain": None}
-    for item in items:
-        if re.search(r'^\+?\d{10,15}$', re.sub(r'[\s\-()]', '', item)):
-            data["phone"] = item
-        elif re.search(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', item):
-            data["email"] = item
-        elif re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', item):
-            data["fio"] = item
-        elif re.search(r'^[a-zA-Z0-9_]{3,30}$', item):
-            data["username"] = item
-        elif re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', item):
-            data["ip"] = item
-        elif "." in item and len(item.split()) == 1:
-            data["domain"] = item
+    
+    # Парсим поля
+    data = {
+        "phone": None,
+        "email": None,
+        "fio": None,
+        "username_hide": None,
+        "ip": None,
+        "domain": None
+    }
+    
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if ':' in line:
+            key, value = line.split(':', 1)
+            key = key.strip().upper()
+            value = value.strip()
+            if key == 'ФИО':
+                data["fio"] = value
+            elif key == 'ПОЧТА':
+                data["email"] = value
+            elif key == 'ТЕЛЕФОН':
+                data["phone"] = value
+            elif key == 'USERNAME':
+                data["username_hide"] = value
+            elif key == 'IP':
+                data["ip"] = value
+            elif key == 'ДОМЕН':
+                data["domain"] = value
+    
+    # Получаем контакт
+    contact = user_state.get(f"hide_contact_{user_id}", {})
+    
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO hide_requests (user_id, phone, email, fio, username, ip, domain, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-        ''', (user_id, data["phone"], data["email"], data["fio"], data["username"], data["ip"], data["domain"]))
+            INSERT INTO hide_requests (
+                user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        ''', (
+            user_id,
+            contact.get('username') or message.from_user.username or 'нет',
+            contact.get('phone') or '—',
+            data["phone"], data["email"], data["fio"],
+            data["username_hide"], data["ip"], data["domain"]
+        ))
         request_id = cur.lastrowid
         conn.commit()
         conn.close()
+        
         admin_text = (
-            f"🔔 *Новая заявка # {request_id}*\n\n"
-            f"👤 Пользователь: `{user_id}`\n"
+            f"🔔 *Новая заявка на скрытие данных # {request_id}*\n\n"
+            f"👤 Пользователь: @{contact.get('username') or 'нет'} | `{user_id}`\n"
+            f"📱 Контактный телефон: {contact.get('phone') or '—'}\n"
             f"📱 Телефон: {data['phone'] or '—'}\n"
-            f"📧 Email: {data['email'] or '—'}\n"
+            f"📧 Почта: {data['email'] or '—'}\n"
             f"👤 ФИО: {data['fio'] or '—'}\n"
-            f"🆔 Username: {data['username'] or '—'}\n"
+            f"🆔 Username: {data['username_hide'] or '—'}\n"
             f"🌐 IP: {data['ip'] or '—'}\n"
             f"🌍 Домен: {data['domain'] or '—'}"
         )
+        
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
             types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
         )
         bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown", reply_markup=markup)
+        
         bot.send_message(
             user_id,
-            "✅ *Заявка отправлена!*\n\n⏳ Ожидай решения администратора.",
+            "✅ *Заявка отправлена!*\n\n"
+            "⏳ Ожидай решения администратора.\n"
+            "📨 Уведомление придёт, когда заявка будет рассмотрена.",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -1539,27 +1658,45 @@ def approve_hide(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
         return
+    
     request_id = int(call.data.split('_')[2])
     bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
+    
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT user_id, phone, email, fio, username, ip, domain FROM hide_requests WHERE id = ?", (request_id,))
+        cur.execute('''
+            SELECT user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain 
+            FROM hide_requests WHERE id = ?
+        ''', (request_id,))
         row = cur.fetchone()
         if not row:
             bot.send_message(ADMIN_ID, "❌ Заявка не найдена.")
             return
-        user_id, phone, email, fio, username, ip, domain = row
+        
+        user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain = row
+        
         cur.execute('''
-            INSERT OR REPLACE INTO hidden_data (user_id, phone, email, fio, username, ip, domain)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, phone, email, fio, username, ip, domain))
+            INSERT OR REPLACE INTO hidden_data (
+                user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, username, contact_phone, phone, email, fio, username_hide, ip, domain))
+        
         cur.execute("UPDATE hide_requests SET status = 'approved', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
         conn.commit()
         conn.close()
+        
         bot.send_message(
             user_id,
-            "✅ *Ваша заявка на скрытие данных ОДОБРЕНА!*\n\n🔒 Ваши данные теперь скрыты от поиска.",
+            "✅ *Ваша заявка на скрытие данных ОДОБРЕНА!*\n\n"
+            "🔒 Ваши данные теперь скрыты от поиска.\n\n"
+            "📋 Скрытые данные:\n"
+            f"• Телефон: {phone or '—'}\n"
+            f"• Email: {email or '—'}\n"
+            f"• ФИО: {fio or '—'}\n"
+            f"• Username: {username_hide or '—'}\n"
+            f"• IP: {ip or '—'}\n"
+            f"• Домен: {domain or '—'}",
             parse_mode="Markdown"
         )
         bot.send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
@@ -1571,8 +1708,10 @@ def reject_hide(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
         return
+    
     request_id = int(call.data.split('_')[2])
     bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
+    
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -1584,7 +1723,9 @@ def reject_hide(call):
             conn.commit()
             bot.send_message(
                 user_id,
-                "❌ *Ваша заявка на скрытие данных ОТКЛОНЕНА*\n\n📌 Попробуй отправить заявку ещё раз.",
+                "❌ *Ваша заявка на скрытие данных ОТКЛОНЕНА*\n\n"
+                "📌 Возможно, данные не соответствуют требованиям.\n"
+                "🔄 Попробуй отправить заявку ещё раз с корректными данными.",
                 parse_mode="Markdown"
             )
         conn.close()
@@ -1597,23 +1738,30 @@ def list_hide_requests(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
         return
+    
     bot.answer_callback_query(call.id)
+    
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT id, user_id, phone, email, fio, username, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        cur.execute("SELECT id, user_id, username, phone, email, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
         rows = cur.fetchall()
         conn.close()
+        
         if not rows:
             bot.send_message(ADMIN_ID, "📋 *Нет активных заявок.*", parse_mode="Markdown")
             return
-        text = "📋 *Заявки на скрытие*\n\n"
+        
+        text = "📋 *Заявки на скрытие данных*\n\n"
         for row in rows[:10]:
-            req_id, user_id, phone, email, fio, username, created = row
-            text += f"🔹 *#{req_id}* | @{username or 'нет'} | `{user_id}`\n"
-            text += f"   📱 {phone or '—'} | 📧 {email or '—'}\n"
-            text += f"   👤 {fio or '—'}\n"
-            text += f"   🕐 {created[:16]}\n\n"
+            req_id, user_id, username, phone, email, fio, created = row
+            text += (
+                f"🔹 *#{req_id}* | @{username or 'нет'} | `{user_id}`\n"
+                f"   📱 {phone or '—'} | 📧 {email or '—'}\n"
+                f"   👤 {fio or '—'}\n"
+                f"   🕐 {created[:16]}\n\n"
+            )
+        
         markup = types.InlineKeyboardMarkup()
         for row in rows[:5]:
             req_id = row[0]
@@ -1622,6 +1770,7 @@ def list_hide_requests(call):
                 types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
             )
         markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
+        
         bot.send_message(ADMIN_ID, text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
         bot.send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
@@ -1633,6 +1782,7 @@ def admin_help_command(message):
     if message.from_user.id != ADMIN_ID:
         bot.reply_to(message, "❌ Только для админа.")
         return
+    
     help_text = (
         "👑 *Админ-команды Глаз Исиды*\n\n"
         "📌 *Управление пользователями*\n"
@@ -1647,10 +1797,6 @@ def admin_help_command(message):
         "📌 *Скрытие данных*\n"
         "`/requests` — список заявок на скрытие\n"
         "`/hide <user_id>` — раскрыть данные\n\n"
-        "📌 *Поиск*\n"
-        "`/geoint <координаты/адрес>` — геоинт\n"
-        "`/metadata <ссылка на фото>` — метаданные\n"
-        "`/telegram <@username>` — поиск в Telegram\n\n"
         "👁️ *Глаз Исиды — OSINT*\n"
         "🛡️ @Arhapov"
     )
@@ -1737,15 +1883,15 @@ def requests_command(message):
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT id, user_id, phone, email, fio, username, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        cur.execute("SELECT id, user_id, username, phone, email, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
         rows = cur.fetchall()
         conn.close()
         if not rows:
-            bot.reply_to(message, "📋 *Нет активных заявок на скрытие данных.*", parse_mode="Markdown")
+            bot.reply_to(message, "📋 *Нет активных заявок.*", parse_mode="Markdown")
             return
         text = "📋 *Заявки на скрытие данных*\n\n"
         for row in rows[:10]:
-            req_id, user_id, phone, email, fio, username, created = row
+            req_id, user_id, username, phone, email, fio, created = row
             text += (
                 f"🔹 *#{req_id}* | @{username or 'нет'} | `{user_id}`\n"
                 f"   📱 {phone or '—'} | 📧 {email or '—'}\n"
@@ -1756,8 +1902,8 @@ def requests_command(message):
         for row in rows[:5]:
             req_id = row[0]
             markup.add(
-                types.InlineKeyboardButton(f"✅ Одобрить #{req_id}", callback_data=f"approve_hide_{req_id}"),
-                types.InlineKeyboardButton(f"❌ Отклонить #{req_id}", callback_data=f"reject_hide_{req_id}")
+                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
+                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
             )
         markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
         bot.reply_to(message, text, parse_mode="Markdown", reply_markup=markup)
@@ -1889,15 +2035,20 @@ def main_menu_keyboard():
 def callback_handler(call):
     try:
         bot.answer_callback_query(call.id)
+        
         if call.data == "menu_back":
             bot.edit_message_text(
-                "👁️ *Глаз Исиды — OSINT*\n\n🕵️ *Глубокий OSINT-поиск*\n45+ источников\n\n⚡ *Выбери действие:*",
+                "👁️ *Глаз Исиды — OSINT*\n\n"
+                "🕵️ *Глубокий OSINT-поиск*\n"
+                "45+ источников\n\n"
+                "⚡ *Выбери действие:*",
                 call.message.chat.id,
                 call.message.message_id,
                 parse_mode="Markdown",
                 reply_markup=main_menu_keyboard()
             )
             return
+        
         if call.data == "menu_profile":
             user = call.from_user
             user_data = get_user(user.id, user.username or "Unknown")
@@ -1923,6 +2074,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "menu_balance":
             user_id = call.from_user.id
             remaining = get_remaining(user_id)
@@ -1946,6 +2098,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "menu_help":
             bot.edit_message_text(
                 "❓ *Помощь*\n\n"
@@ -1964,6 +2117,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "global_search":
             bot.edit_message_text(
                 "🌐 *ГЛОБАЛЬНЫЙ ПОИСК*\n\n"
@@ -1984,6 +2138,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "phone_search":
             bot.edit_message_text(
                 "📱 *ПРОВЕРКА ТЕЛЕФОНА*\n\n"
@@ -1998,6 +2153,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "email_search":
             bot.edit_message_text(
                 "📧 *ПРОВЕРКА EMAIL*\n\n"
@@ -2012,6 +2168,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "username_search":
             bot.edit_message_text(
                 "👤 *ПОИСК ПО USERNAME*\n\n"
@@ -2026,6 +2183,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "domain_search":
             bot.edit_message_text(
                 "🌐 *ПОИСК ПО IP/ДОМЕНУ*\n\n"
@@ -2041,6 +2199,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "geoint_search":
             bot.edit_message_text(
                 "🌍 *ГЕОИНТ*\n\n"
@@ -2055,6 +2214,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "metadata_search":
             bot.edit_message_text(
                 "🖼️ *МЕТАДАННЫЕ ФОТО*\n\n"
@@ -2068,6 +2228,7 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "telegram_search":
             bot.edit_message_text(
                 "📱 *ПОИСК ПО TELEGRAM*\n\n"
@@ -2081,9 +2242,11 @@ def callback_handler(call):
                 )
             )
             return
+        
         if call.data == "hide_data":
             hide_data_callback(call)
             return
+            
     except Exception as e:
         logger.error(f"❌ Callback error: {e}")
 
@@ -2147,7 +2310,8 @@ def handle_text(message):
                 )
             except asyncio.TimeoutError:
                 bot.edit_message_text(
-                    "⚠️ *Поиск прерван по таймауту (90 секунд)*\n\n📌 Показаны только быстрые результаты.",
+                    "⚠️ *Поиск прерван по таймауту (90 секунд)*\n\n"
+                    "📌 Показаны только быстрые результаты.",
                     chat_id,
                     msg.message_id,
                     parse_mode="Markdown"
@@ -2211,7 +2375,7 @@ if __name__ == "__main__":
     logger.info("📊 45+ источников")
     logger.info("🧅 Даркнет: Ahmia · Exonera Tor · IntelX · WhatCMS")
     logger.info("🔄 Обход блокировок: curl_cffi")
-    logger.info("🔒 Скрытие данных: бесплатно")
+    logger.info("🔒 Скрытие данных: бесплатно (заявка админу)")
     logger.info("👁️ С поддержкой Архапова")
     
     try:

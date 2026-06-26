@@ -134,14 +134,6 @@ def init_db():
             )
         ''')
         
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS phone_cache (
-                phone TEXT PRIMARY KEY,
-                data TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована")
@@ -192,14 +184,6 @@ def migrate_db():
             if 'username' not in columns:
                 cur.execute("ALTER TABLE hidden_data ADD COLUMN username TEXT")
                 logger.info("✅ Добавлена колонка username в hidden_data")
-        
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS phone_cache (
-                phone TEXT PRIMARY KEY,
-                data TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
         
         conn.commit()
         conn.close()
@@ -573,293 +557,6 @@ def _notify_owner(owner_id: int, query: str):
         )
     except Exception as e:
         logger.error(f"Notify owner error: {e}")
-
-# ==================== ПОИСК ВЛАДЕЛЬЦА НОМЕРА (С ТЕЛЕФОННОЙ КНИГОЙ) ====================
-
-async def search_phone_owner(phone: str) -> dict:
-    """Расширенный поиск владельца номера телефона с телефонной книгой"""
-    try:
-        clean = clean_phone(phone)
-        if len(clean) < 7:
-            return {"found": False, "error": "Некорректный номер"}
-        
-        # Проверяем кэш
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT data, created_at FROM phone_cache WHERE phone = ?", (clean,))
-        cache = cur.fetchone()
-        conn.close()
-        
-        if cache:
-            cache_time = datetime.fromisoformat(cache[1])
-            if (datetime.now() - cache_time).days < 7:
-                try:
-                    return json.loads(cache[0])
-                except:
-                    pass
-        
-        result = {
-            "found": True,
-            "phone": phone,
-            "sources": {},
-            "possible_names": [],
-            "possible_surnames": [],
-            "social_media": {},
-            "breaches": [],
-            "phone_book": [],
-            "possible_emails": []
-        }
-        
-        names = []
-        surnames = []
-        social = {}
-        phone_book_contacts = []
-        possible_emails = []
-        
-        # ===== 1. ОПЕРАТОР =====
-        try:
-            parsed = phonenumbers.parse(f"+{clean}" if not clean.startswith('+') else clean, None)
-            result["sources"]["operator"] = {
-                "country": geocoder.country_name_for_number(parsed, "ru") or "Неизвестно",
-                "region": geocoder.description_for_number(parsed, "ru") or "Неизвестно",
-                "carrier": carrier.name_for_number(parsed, "ru") or "Неизвестно"
-            }
-        except:
-            pass
-        
-        # ===== 2. ТЕЛЕФОННАЯ КНИГА (GetContact подобный) =====
-        phone_book_queries = [
-            f'"{phone}" контакт',
-            f'"{phone}" "телефонная книга"',
-            f'"{phone}" "записная книжка"',
-            f'"{phone}" "контакты"',
-            f'"{phone}" "друзья"',
-            f'"{phone}" "коллеги"',
-            f'"{phone}" "родственники"',
-            f'"{phone}" "семья"',
-            f'"{phone}" "работа"',
-            f'"{phone}" "знакомые"',
-            f'"{phone}" "контактный"',
-            f'"{phone}" "абонент"',
-            f'"{phone}" "владелец"',
-            f'"{phone}" "номера"',
-            f'"{phone}" "список"',
-        ]
-        
-        for q in phone_book_queries[:10]:
-            try:
-                results = await duckduckgo_search(q)
-                if results:
-                    for item in results[:2]:
-                        text = item.get("text", "") + " " + item.get("title", "")
-                        
-                        contact_pattern = r'(?:контакт|друг|коллега|родственник|знакомый)\s*[:\-]?\s*([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)'
-                        found_contacts = re.findall(contact_pattern, text, re.IGNORECASE)
-                        for contact in found_contacts:
-                            if contact not in names and len(contact) > 4:
-                                names.append(contact)
-                                phone_book_contacts.append({
-                                    "name": contact,
-                                    "source": "phone_book",
-                                    "confidence": "высокая"
-                                })
-                        
-                        name_with_phone = re.findall(r'([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+).*?([\d\s\-\(\)\+]{10,})', text)
-                        for name, num in name_with_phone:
-                            if name not in names and len(name) > 4:
-                                names.append(name)
-                                phone_book_contacts.append({
-                                    "name": name,
-                                    "phone": re.sub(r'\D', '', num),
-                                    "source": "phone_book",
-                                    "confidence": "средняя"
-                                })
-                        
-                        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-                        found_emails = re.findall(email_pattern, text)
-                        for email in found_emails:
-                            if email not in possible_emails:
-                                possible_emails.append(email)
-                                email_name = email.split('@')[0]
-                                if email_name not in names and len(email_name) > 2:
-                                    names.append(email_name)
-            except:
-                continue
-        
-        # ===== 3. СОЦИАЛЬНЫЕ СЕТИ =====
-        social_queries = {
-            "vk_contacts": f'"{phone}" site:vk.com "контакт"',
-            "facebook_contacts": f'"{phone}" site:facebook.com "friend"',
-            "instagram_contacts": f'"{phone}" site:instagram.com "follow"',
-            "twitter_contacts": f'"{phone}" site:twitter.com "follow"',
-            "linkedin_contacts": f'"{phone}" site:linkedin.com "contact"',
-            "telegram_contacts": f'"{phone}" site:t.me "contact"',
-            "whatsapp_contacts": f'"{phone}" site:wa.me "contact"',
-        }
-        
-        for site, query in social_queries.items():
-            try:
-                results = await duckduckgo_search(query)
-                if results:
-                    social[site] = {"found": True, "count": len(results)}
-                    for item in results[:2]:
-                        text = item.get("text", "") + " " + item.get("title", "")
-                        name_pattern = r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+'
-                        found_names = re.findall(name_pattern, text)
-                        for name in found_names:
-                            if len(name) > 4 and name not in names:
-                                names.append(name)
-                                phone_book_contacts.append({
-                                    "name": name,
-                                    "source": site,
-                                    "confidence": "средняя"
-                                })
-                                parts = name.split()
-                                if len(parts) >= 2 and parts[0] not in surnames:
-                                    surnames.append(parts[0])
-            except:
-                continue
-        
-        # ===== 4. TELEGRAM =====
-        try:
-            tg_queries = [
-                f'"{phone}" site:t.me "контакт"',
-                f'"{phone}" site:t.me "номер"',
-                f'"{phone}" site:t.me "телефон"',
-            ]
-            for q in tg_queries:
-                results = await duckduckgo_search(q)
-                if results:
-                    for item in results[:2]:
-                        text = item.get("text", "") + " " + item.get("title", "")
-                        name_pattern = r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+'
-                        found_names = re.findall(name_pattern, text)
-                        for name in found_names:
-                            if len(name) > 4 and name not in names:
-                                names.append(name)
-                                phone_book_contacts.append({
-                                    "name": name,
-                                    "source": "telegram",
-                                    "confidence": "средняя"
-                                })
-        except:
-            pass
-        
-        # ===== 5. GOOGLE DORKS =====
-        dorks = [
-            f'"{phone}" "контакт" site:ru',
-            f'"{phone}" "телефон" site:ru',
-            f'"{phone}" "моб" site:ru',
-            f'"{phone}" "связаться" site:ru',
-            f'"{phone}" "позвонить" site:ru',
-            f'"{phone}" "написать" site:ru',
-        ]
-        
-        for dork in dorks[:5]:
-            try:
-                results = await google_dorks_search(dork)
-                if results:
-                    for item in results[:2]:
-                        text = item.get("text", "") + " " + item.get("title", "")
-                        name_pattern = r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+'
-                        found_names = re.findall(name_pattern, text)
-                        for name in found_names:
-                            if len(name) > 4 and name not in names:
-                                names.append(name)
-                                phone_book_contacts.append({
-                                    "name": name,
-                                    "source": "google_dorks",
-                                    "confidence": "низкая"
-                                })
-            except:
-                continue
-        
-        # ===== 6. LEAKCHECK =====
-        try:
-            lc_result = await leakcheck_lookup(phone)
-            if lc_result and lc_result.get("found"):
-                result["breaches"].append({"source": "leakcheck", "data": lc_result})
-                for source in lc_result.get("sources", []):
-                    if "name" in source:
-                        names.append(source["name"])
-                        phone_book_contacts.append({
-                            "name": source["name"],
-                            "source": "leakcheck",
-                            "confidence": "высокая"
-                        })
-                    if "email" in source:
-                        if source["email"] not in possible_emails:
-                            possible_emails.append(source["email"])
-                        email_name = source["email"].split("@")[0]
-                        if email_name not in names:
-                            names.append(email_name)
-        except:
-            pass
-        
-        # ===== 7. HUDSONROCK =====
-        try:
-            hr_result = await hudsonrock_lookup(phone)
-            if hr_result and hr_result.get("found"):
-                result["breaches"].append({"source": "hudsonrock", "data": hr_result})
-                for breach in hr_result.get("breaches", []):
-                    if "username" in breach and breach["username"] not in names:
-                        names.append(breach["username"])
-                        phone_book_contacts.append({
-                            "name": breach["username"],
-                            "source": "hudsonrock",
-                            "confidence": "средняя"
-                        })
-                    if "email" in breach:
-                        if breach["email"] not in possible_emails:
-                            possible_emails.append(breach["email"])
-                        email_name = breach["email"].split("@")[0]
-                        if email_name not in names:
-                            names.append(email_name)
-        except:
-            pass
-        
-        # ===== 8. WHATSAPP И TELEGRAM =====
-        try:
-            wa_result = await whatsapp_check(phone)
-            if wa_result and wa_result.get("exists"):
-                result["sources"]["whatsapp"] = wa_result
-        except:
-            pass
-        
-        try:
-            tg_result = await telegram_check(phone)
-            if tg_result and tg_result.get("exists"):
-                result["sources"]["telegram"] = tg_result
-        except:
-            pass
-        
-        # Сохраняем результаты
-        if names:
-            result["possible_names"] = list(dict.fromkeys(names))[:20]
-        if surnames:
-            result["possible_surnames"] = list(dict.fromkeys(surnames))[:10]
-        if social:
-            result["social_media"] = social
-        if phone_book_contacts:
-            result["phone_book"] = phone_book_contacts[:15]
-        if possible_emails:
-            result["possible_emails"] = list(dict.fromkeys(possible_emails))[:10]
-        
-        # Сохраняем в кэш
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute("INSERT OR REPLACE INTO phone_cache (phone, data, created_at) VALUES (?, ?, ?)",
-                       (clean, json.dumps(result, ensure_ascii=False), datetime.now().isoformat()))
-            conn.commit()
-            conn.close()
-        except:
-            pass
-        
-        return result
-    except Exception as e:
-        logger.error(f"Search phone owner error: {e}")
-        return {"found": False, "error": str(e)[:100]}
 
 # ==================== ФУНКЦИИ ДЛЯ ВЫБОРА РЕЖИМА ПОИСКА ====================
 
@@ -1319,37 +1016,7 @@ async def global_lookup(query: str) -> dict:
             ("ip_api", run_with_timeout(ip_api_lookup(query), 6)),
             ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
             ("google_dorks", run_with_timeout(google_dorks_search(query), 8)),
-            ("phone_owner", run_with_timeout(search_phone_owner(query), 15)),
         ]
-        
-        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-        for idx, (name, _) in enumerate(tasks):
-            if results[idx] and not isinstance(results[idx], Exception):
-                if name == "phone_owner":
-                    owner_data = results[idx]
-                    if owner_data and owner_data.get("found"):
-                        if "possible_names" in owner_data:
-                            result["possible_names"] = owner_data["possible_names"]
-                        if "possible_surnames" in owner_data:
-                            result["possible_surnames"] = owner_data["possible_surnames"]
-                        if "social_media" in owner_data:
-                            result["social_media"] = owner_data["social_media"]
-                        if "breaches" in owner_data:
-                            result["breaches"] = owner_data["breaches"]
-                        if "phone_book" in owner_data:
-                            result["phone_book"] = owner_data["phone_book"]
-                        if "possible_emails" in owner_data:
-                            result["possible_emails"] = owner_data["possible_emails"]
-                        result["sources"]["phone_owner"] = owner_data
-                        total += 1
-                else:
-                    result["sources"][name] = results[idx]
-                    if isinstance(results[idx], list):
-                        total += len(results[idx])
-                    elif isinstance(results[idx], dict) and results[idx].get('found'):
-                        total += 1
-                    elif isinstance(results[idx], dict):
-                        total += 1
     
     elif qtype == "ip":
         tasks = [
@@ -1390,17 +1057,18 @@ async def global_lookup(query: str) -> dict:
     
     else:
         tasks = [("duckduckgo", run_with_timeout(duckduckgo_search(query), 8))]
-        if tasks:
-            results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-            for idx, (name, _) in enumerate(tasks):
-                if results[idx] and not isinstance(results[idx], Exception):
-                    result["sources"][name] = results[idx]
-                    if isinstance(results[idx], list):
-                        total += len(results[idx])
-                    elif isinstance(results[idx], dict) and results[idx].get('found'):
-                        total += 1
-                    elif isinstance(results[idx], dict):
-                        total += 1
+    
+    if tasks:
+        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
+        for idx, (name, _) in enumerate(tasks):
+            if results[idx] and not isinstance(results[idx], Exception):
+                result["sources"][name] = results[idx]
+                if isinstance(results[idx], list):
+                    total += len(results[idx])
+                elif isinstance(results[idx], dict) and results[idx].get('found'):
+                    total += 1
+                elif isinstance(results[idx], dict):
+                    total += 1
     
     result["total_results"] = total
     return result
@@ -1490,118 +1158,205 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     qtype = data.get("type", "text")
     total = data.get("total_results", 0)
     
+    if qtype in ["username", "telegram_id"]:
+        telegram = sources.get("telegram", {})
+        if sources.get("hidden"):
+            return f"""
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔒 Данные скрыты</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&display=swap');
+        body {{
+            background: #0a0a0a;
+            color: #d0c0c0;
+            font-family: 'Cinzel', serif;
+            padding: 30px 20px;
+        }}
+        .container {{
+            max-width: 800px;
+            margin: 0 auto;
+            background: #0d0a0a;
+            border-radius: 16px;
+            padding: 40px;
+            border: 1px solid #3a1a1a;
+            text-align: center;
+        }}
+        .lock {{
+            font-size: 80px;
+            margin: 30px 0;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #2a1212;
+            font-size: 12px;
+            color: #3a2a2a;
+            text-align: center;
+            font-family: 'Courier New', monospace;
+        }}
+        .footer a {{ color: #6a3a3a; text-decoration: none; border-bottom: 1px dotted #3a1a1a; }}
+        .footer a:hover {{ color: #cc4444; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="lock">🔒</div>
+        <h1 style="color:#cc3333;">Данные скрыты</h1>
+        <p style="color:#8a6a6a; margin-top:20px;">Этот пользователь скрыл свои данные от поиска.</p>
+        <div class="footer">
+            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Afipov" target="_blank">@Afipov</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        if telegram.get("found"):
+            html = f"""
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>👁️ Глаз Исиды — Telegram Профиль</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&display=swap');
+        body {{
+            background: #0a0a0a;
+            color: #d0c0c0;
+            font-family: 'Cinzel', serif;
+            padding: 30px 20px;
+        }}
+        .container {{
+            max-width: 800px;
+            margin: 0 auto;
+            background: #0d0a0a;
+            border-radius: 16px;
+            padding: 40px;
+            border: 1px solid #3a1a1a;
+        }}
+        .profile-header {{
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            border-bottom: 2px solid #3a1a1a;
+            padding-bottom: 20px;
+            margin-bottom: 20px;
+        }}
+        .avatar {{
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background: #1a0a0a;
+            border: 2px solid #cc3333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+        }}
+        .profile-info h1 {{
+            color: #cc3333;
+            font-size: 24px;
+        }}
+        .profile-info .username {{
+            color: #6a4a4a;
+            font-size: 16px;
+        }}
+        .info-block {{
+            margin: 15px 0;
+            padding: 15px;
+            background: #0a0808;
+            border-radius: 8px;
+            border-left: 3px solid #cc3333;
+        }}
+        .info-block .label {{
+            color: #6a4a4a;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }}
+        .info-block .value {{
+            color: #d0b0b0;
+            font-size: 16px;
+            margin-top: 4px;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #2a1212;
+            font-size: 12px;
+            color: #3a2a2a;
+            text-align: center;
+            font-family: 'Courier New', monospace;
+        }}
+        .badge {{
+            display: inline-block;
+            background: #1a0a0a;
+            color: #cc3333;
+            padding: 2px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            border: 1px solid #3a1a1a;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="profile-header">
+            <div class="avatar">👤</div>
+            <div class="profile-info">
+                <h1>{telegram.get('first_name', '—')} {telegram.get('last_name', '')}</h1>
+                <div class="username">@{telegram.get('username', '—')}</div>
+                <div><span class="badge">{'🤖 Бот' if telegram.get('is_bot') else '👤 Пользователь'}</span></div>
+            </div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">🆔 TELEGRAM ID</div>
+            <div class="value">{telegram.get('user_id', '—')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">🗝️ ДАТА РЕГИСТРАЦИИ</div>
+            <div class="value">{telegram.get('age', '≈ Неизвестно')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">👮‍♂️ ИНТЕРЕСОВАЛИСЬ</div>
+            <div class="value">{telegram.get('interested', 0)} человек</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">📝 ОПИСАНИЕ</div>
+            <div class="value">{telegram.get('description', '—')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">📝 BIO</div>
+            <div class="value">{telegram.get('bio', '—')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">🔗 ССЫЛКА</div>
+            <div class="value"><a href="{telegram.get('url', '#')}" style="color:#cc5555;">{telegram.get('url', '—')}</a></div>
+        </div>
+        
+        <div class="footer">
+            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Afipov" target="_blank">@Afipov</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+            return html
+    
     all_results = []
-    
-    # ===== ДЛЯ ТЕЛЕФОНА — ДОБАВЛЯЕМ ИМЕНА, ТЕЛЕФОННУЮ КНИГУ И СОЦСЕТИ =====
-    if qtype == "phone":
-        if data.get("possible_names"):
-            for i, name in enumerate(data["possible_names"][:15], 1):
-                all_results.append({
-                    "_source": "phone_owner",
-                    "title": f"👤 {name}",
-                    "text": f"Возможный владелец номера #{i}",
-                    "extra": "Найден через OSINT-поиск"
-                })
-        
-        if data.get("possible_surnames"):
-            for i, surname in enumerate(data["possible_surnames"][:10], 1):
-                all_results.append({
-                    "_source": "phone_owner",
-                    "title": f"📛 {surname}",
-                    "text": f"Возможная фамилия #{i}",
-                    "extra": "Найдена через OSINT-поиск"
-                })
-        
-        # ===== ТЕЛЕФОННАЯ КНИГА =====
-        if data.get("phone_book"):
-            for contact in data["phone_book"][:10]:
-                name = contact.get("name", "—")
-                source = contact.get("source", "неизвестно")
-                confidence = contact.get("confidence", "низкая")
-                emoji = "🟢" if confidence == "высокая" else "🟡" if confidence == "средняя" else "🔴"
-                all_results.append({
-                    "_source": "phone_book",
-                    "title": f"📖 {name}",
-                    "text": f"Найден в телефонной книге (источник: {source})",
-                    "extra": f"{emoji} Достоверность: {confidence}"
-                })
-        
-        # ===== EMAIL ИЗ КОНТАКТОВ =====
-        if data.get("possible_emails"):
-            for email in data["possible_emails"][:5]:
-                all_results.append({
-                    "_source": "phone_book",
-                    "title": f"📧 {email}",
-                    "text": "Email связанный с номером",
-                    "extra": "Найден через телефонную книгу"
-                })
-        
-        # ===== СОЦИАЛЬНЫЕ СЕТИ =====
-        if data.get("social_media"):
-            social_names = {
-                "vk_contacts": "VKontakte",
-                "facebook_contacts": "Facebook",
-                "instagram_contacts": "Instagram",
-                "twitter_contacts": "Twitter",
-                "linkedin_contacts": "LinkedIn",
-                "telegram_contacts": "Telegram",
-                "whatsapp_contacts": "WhatsApp",
-                "vk": "VKontakte",
-                "facebook": "Facebook",
-                "instagram": "Instagram",
-                "twitter": "Twitter",
-                "youtube": "YouTube",
-                "tiktok": "TikTok",
-                "telegram": "Telegram",
-                "whatsapp": "WhatsApp",
-                "avito": "Avito",
-                "youla": "Youla",
-                "olx": "OLX",
-                "2gis": "2GIS",
-                "cian": "CIAN",
-                "hh": "HH.ru",
-                "superjob": "SuperJob",
-                "rabota": "Rabota.ru",
-                "profi": "Profi.ru",
-                "youdo": "YouDo",
-                "habr": "Habr",
-                "pikabu": "Pikabu",
-                "dzen": "Dzen"
-            }
-            for site, info in data["social_media"].items():
-                if info.get("found"):
-                    name = social_names.get(site, site.capitalize())
-                    all_results.append({
-                        "_source": "social",
-                        "title": f"🌐 {name}",
-                        "text": "Профиль найден",
-                        "extra": f"Аккаунт существует в {name}"
-                    })
-        
-        if data.get("breaches"):
-            for breach in data["breaches"][:3]:
-                source = breach.get("source", "неизвестно")
-                bdata = breach.get("data", {})
-                if source == "leakcheck":
-                    all_results.append({
-                        "_source": "breach",
-                        "title": f"🔓 LeakCheck",
-                        "text": f"Найдено {len(bdata.get('sources', []))} источников утечек",
-                        "extra": "Данные могли быть скомпрометированы"
-                    })
-                elif source == "hudsonrock":
-                    all_results.append({
-                        "_source": "breach",
-                        "title": f"🔓 HudsonRock",
-                        "text": f"Найдено {bdata.get('total', 0)} записей в утечках",
-                        "extra": "Данные могли быть скомпрометированы"
-                    })
-    
-    # ===== ОСТАЛЬНЫЕ ИСТОЧНИКИ =====
     for source_name, items in sources.items():
         if not items:
-            continue
-        if source_name == "phone_owner":
             continue
         if isinstance(items, list):
             for item in items:
@@ -1784,11 +1539,11 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
                 <div class="sub">⚡ Запрос: {query} · Тип: {qtype} · {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>
                 <div class="sub" style="color:#4a2a2a; margin-top:2px;">🛡️ Множество источников · Глубокий OSINT</div>
             </div>
-            <div><span class="badge">🎯 НАЙДЕНО: {len(display_results)}</span></div>
+            <div><span class="badge">🎯 НАЙДЕНО: {total}</span></div>
         </div>
         <div class="stats-bar">
-            <span class="stat">📊 Всего результатов: <strong>{len(display_results)}</strong></span>
-            <span class="stat">🔍 Источников с данными: <strong>{len(sources)}</strong></span>
+            <span class="stat">📊 Всего результатов: <strong>{total}</strong></span>
+            <span class="stat">🔍 Источников с данными: <strong>{len(display_results)}</strong></span>
             <span class="stat">⚡ Статус: <strong style="color:#cc3333;">АКТИВЕН</strong></span>
         </div>
 """
@@ -2382,37 +2137,25 @@ async def perform_search(chat_id, user_id, query, mode):
             safe_send_message(chat_id, "❌ Лимит поисков исчерпан!\n\n⏰ Сброс в 00:00 МСК")
             return
         
-        search_type = None
-        if mode in ["username"]:
-            search_type = "username"
-        elif mode in ["telegram_id"]:
-            search_type = "telegram_id"
-        elif mode in ["email", "global"]:
-            qtype = detect_query_type(query)
-            if qtype == "email":
-                search_type = "email"
-            elif qtype == "phone":
-                search_type = "phone"
-        
         if mode == "global":
-            await run_global_search(chat_id, user_id, query, search_type)
+            await run_global_search(chat_id, user_id, query)
         elif mode == "phone":
-            await run_phone_search(chat_id, user_id, query, search_type)
+            await run_phone_search(chat_id, user_id, query)
         elif mode == "telegram_id":
-            await run_telegram_id_search(chat_id, user_id, query, search_type)
+            await run_telegram_id_search(chat_id, user_id, query)
         elif mode == "ip":
-            await run_ip_search(chat_id, user_id, query, search_type)
+            await run_ip_search(chat_id, user_id, query)
         elif mode == "domain":
-            await run_domain_search(chat_id, user_id, query, search_type)
+            await run_domain_search(chat_id, user_id, query)
         elif mode == "username":
-            await run_username_search(chat_id, user_id, query, search_type)
+            await run_username_search(chat_id, user_id, query)
         else:
             safe_send_message(chat_id, "❌ Неизвестный режим поиска.")
     except Exception as e:
         logger.error(f"Perform search error: {e}")
         safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
 
-async def run_global_search(chat_id, user_id, query, search_type=None):
+async def run_global_search(chat_id, user_id, query):
     start_time = time.time()
     msg = safe_send_message(chat_id, "👁️ Глаз Исиды — глубокое сканирование...\n⏱️ Время: до 120 секунд\n🕵️ Множество источников...")
     
@@ -2424,7 +2167,7 @@ async def run_global_search(chat_id, user_id, query, search_type=None):
     
     elapsed = time.time() - start_time
     total = data.get("total_results", 0)
-    remaining = use_search(user_id, search_type)
+    remaining = use_search(user_id)
     
     if data.get("type") in ["username", "telegram_id"]:
         text = format_telegram_result(data)
@@ -2455,7 +2198,7 @@ async def run_global_search(chat_id, user_id, query, search_type=None):
     except:
         pass
 
-async def run_phone_search(chat_id, user_id, query, search_type=None):
+async def run_phone_search(chat_id, user_id, query):
     start_time = time.time()
     msg = safe_send_message(chat_id, "📱 Поиск по номеру телефона...\n⏱️ Время: до 60 секунд")
     
@@ -2467,7 +2210,7 @@ async def run_phone_search(chat_id, user_id, query, search_type=None):
     
     elapsed = time.time() - start_time
     total = data.get("total_results", 0)
-    remaining = use_search(user_id, search_type or "phone")
+    remaining = use_search(user_id)
     
     if data.get("hidden"):
         safe_edit_message(chat_id, msg.message_id, "🔒 Данные скрыты по запросу владельца")
@@ -2482,7 +2225,7 @@ async def run_phone_search(chat_id, user_id, query, search_type=None):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = f"📱 ОТЧЁТ ПО НОМЕРУ\n\n🔍 Запрос: {query}\n📌 Найдено: {len(data.get('possible_names', [])) + len(data.get('phone_book', [])) + len(data.get('social_media', {}))}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Afipov"
+        caption = f"📱 ОТЧЁТ ПО НОМЕРУ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Afipov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -2493,7 +2236,7 @@ async def run_phone_search(chat_id, user_id, query, search_type=None):
     except:
         pass
 
-async def run_telegram_id_search(chat_id, user_id, query, search_type=None):
+async def run_telegram_id_search(chat_id, user_id, query):
     start_time = time.time()
     msg = safe_send_message(chat_id, "🆔 Поиск по Telegram ID...\n⏱️ Время: до 10 секунд")
     
@@ -2503,7 +2246,7 @@ async def run_telegram_id_search(chat_id, user_id, query, search_type=None):
         safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
         return
     
-    remaining = use_search(user_id, search_type or "telegram_id")
+    remaining = use_search(user_id)
     elapsed = time.time() - start_time
     
     if data.get("hidden"):
@@ -2514,7 +2257,7 @@ async def run_telegram_id_search(chat_id, user_id, query, search_type=None):
     text += f"\n\n⏱️ Время: {elapsed:.1f} сек\n🔍 Осталось: {remaining}/5"
     safe_edit_message(chat_id, msg.message_id, text, parse_mode="Markdown")
 
-async def run_ip_search(chat_id, user_id, query, search_type=None):
+async def run_ip_search(chat_id, user_id, query):
     start_time = time.time()
     msg = safe_send_message(chat_id, "🌐 Поиск по IP-адресу...\n⏱️ Время: до 30 секунд")
     
@@ -2526,7 +2269,7 @@ async def run_ip_search(chat_id, user_id, query, search_type=None):
     
     elapsed = time.time() - start_time
     total = data.get("total_results", 0)
-    remaining = use_search(user_id, search_type)
+    remaining = use_search(user_id)
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
@@ -2548,7 +2291,7 @@ async def run_ip_search(chat_id, user_id, query, search_type=None):
     except:
         pass
 
-async def run_domain_search(chat_id, user_id, query, search_type=None):
+async def run_domain_search(chat_id, user_id, query):
     start_time = time.time()
     msg = safe_send_message(chat_id, "🌐 Поиск по домену...\n⏱️ Время: до 30 секунд")
     
@@ -2560,7 +2303,7 @@ async def run_domain_search(chat_id, user_id, query, search_type=None):
     
     elapsed = time.time() - start_time
     total = data.get("total_results", 0)
-    remaining = use_search(user_id, search_type)
+    remaining = use_search(user_id)
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)
@@ -2582,7 +2325,7 @@ async def run_domain_search(chat_id, user_id, query, search_type=None):
     except:
         pass
 
-async def run_username_search(chat_id, user_id, query, search_type=None):
+async def run_username_search(chat_id, user_id, query):
     start_time = time.time()
     msg = safe_send_message(chat_id, "👤 Поиск по username...\n⏱️ Время: до 10 секунд")
     
@@ -2592,7 +2335,7 @@ async def run_username_search(chat_id, user_id, query, search_type=None):
         safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
         return
     
-    remaining = use_search(user_id, search_type or "username")
+    remaining = use_search(user_id)
     elapsed = time.time() - start_time
     
     if data.get("hidden"):
@@ -2837,7 +2580,6 @@ def global_callback_handler(call):
                 "Пример: +79991234567\n\n"
                 "🔍 Оператор · Страна · Регион\n"
                 "👤 Возможные владельцы\n"
-                "📖 Телефонная книга\n"
                 "🕵️ Утечки · Соцсети",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")

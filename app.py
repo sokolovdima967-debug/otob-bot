@@ -2346,68 +2346,6 @@ def global_callback_handler(call):
     except Exception as e:
         logger.error(f"❌ Global callback error: {e}")
 
-# ==================== ОБРАБОТЧИК ТЕКСТА (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ) ====================
-
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    try:
-        text = message.text.strip()
-        
-        # ПРОПУСКАЕМ КОМАНДЫ (они уже обработаны выше)
-        if text.startswith('/'):
-            return
-        
-        if not text:
-            return
-        
-        if TECH_MODE and message.from_user.id != ADMIN_ID:
-            safe_send_message(message.chat.id, "🔧 Бот на техническом обслуживании\n\n⏰ Вернёмся через несколько минут!")
-            return
-        
-        user_id = message.from_user.id
-        chat_id = message.chat.id
-        
-        if user_search_mode.get(user_id):
-            mode = user_search_mode.pop(user_id)
-            run_search_sync(chat_id, user_id, text, mode)
-            return
-        
-        # Определяем тип запроса для проверки скрытых данных
-        qtype = detect_query_type(text)
-        
-        # Проверяем скрытые данные ТОЛЬКО для соответствующих типов
-        if qtype == "phone":
-            if check_hidden_data(text, "phone"):
-                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
-                return
-        elif qtype == "username":
-            if check_hidden_data(text, "username"):
-                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
-                return
-        elif qtype == "telegram_id":
-            if check_hidden_data(text, "telegram_id"):
-                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
-                return
-        elif qtype == "fio":
-            if check_hidden_data(text, "fio"):
-                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
-                return
-        
-        is_digits = re.match(r'^[\d\s\-()+.]+$', text)
-        
-        if is_digits:
-            markup = get_choice_keyboard_for_numbers()
-            user_state[f"search_query_{user_id}"] = text
-            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
-        else:
-            markup = get_choice_keyboard_for_text()
-            user_state[f"search_query_{user_id}"] = text
-            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
-        
-    except Exception as e:
-        logger.error(f"Handle text error: {e}")
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-
 # ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":

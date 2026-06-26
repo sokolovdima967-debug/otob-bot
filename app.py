@@ -388,13 +388,9 @@ def get_user_data(user_id: int) -> dict:
             "phone": None
         }
 
-# ==================== ПРОВЕРКА СКРЫТЫХ ДАННЫХ (С УЧЁТОМ ТИПА) ====================
+# ==================== ПРОВЕРКА СКРЫТЫХ ДАННЫХ ====================
 
-def check_hidden_data(query: str, qtype: str = None) -> bool:
-    """
-    Проверяет, скрыты ли данные, с учётом типа запроса
-    qtype: 'phone', 'username', 'telegram_id', 'fio', 'email', 'ip', 'domain', 'text', 'global'
-    """
+def check_hidden_data(query: str) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -411,100 +407,42 @@ def check_hidden_data(query: str, qtype: str = None) -> bool:
         for row in hidden_rows:
             owner_id, username, phone, fio = row
             
-            # ===== ПРОВЕРКА ПО ТИПУ ЗАПРОСА =====
-            
-            # 1. Если ищем по телефону - проверяем только телефон
-            if qtype == "phone":
-                if phone:
-                    phone_clean = re.sub(r'\D', '', phone)
-                    if query_digits == phone_clean:
-                        _notify_owner(owner_id, query)
-                        return True
-                continue
-            
-            # 2. Если ищем по username - проверяем только username
-            if qtype == "username":
-                if username and username != "нет":
-                    username_clean = username.lower()
-                    query_username = query_clean.replace('@', '').strip()
-                    if query_username == username_clean:
-                        _notify_owner(owner_id, query)
-                        return True
-                    if query_clean == f"@{username_clean}":
-                        _notify_owner(owner_id, query)
-                        return True
-                continue
-            
-            # 3. Если ищем по Telegram ID - проверяем только ID
-            if qtype == "telegram_id":
-                try:
-                    if query.isdigit():
-                        if int(query) == owner_id:
-                            _notify_owner(owner_id, query)
-                            return True
-                except:
-                    pass
-                if str(owner_id) == query_clean:
+            if phone:
+                phone_clean = re.sub(r'\D', '', phone)
+                if query_digits == phone_clean:
                     _notify_owner(owner_id, query)
                     return True
-                continue
+                if query.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').replace('+', '') == phone_clean:
+                    _notify_owner(owner_id, query)
+                    return True
             
-            # 4. Если ищем по ФИО - проверяем только ФИО
-            if qtype == "fio":
-                if fio:
-                    fio_lower = fio.lower()
-                    if query_clean == fio_lower:
+            if fio:
+                fio_lower = fio.lower()
+                if query_clean == fio_lower:
+                    _notify_owner(owner_id, query)
+                    return True
+                fio_parts = fio_lower.split()
+                query_parts = query_clean.split()
+                if len(fio_parts) >= 2 and len(query_parts) >= 2:
+                    if fio_parts[0] == query_parts[0] and fio_parts[1] == query_parts[1]:
                         _notify_owner(owner_id, query)
                         return True
-                    fio_parts = fio_lower.split()
-                    query_parts = query_clean.split()
-                    if len(fio_parts) >= 2 and len(query_parts) >= 2:
-                        if fio_parts[0] == query_parts[0] and fio_parts[1] == query_parts[1]:
-                            _notify_owner(owner_id, query)
-                            return True
-                continue
+                if fio_parts and query_parts:
+                    if fio_parts[0] == query_parts[0]:
+                        _notify_owner(owner_id, query)
+                        return True
             
-            # 5. Для глобального поиска - проверяем ВСЁ
-            if qtype in ["global", "text", None]:
-                # Проверка телефона
-                if phone:
-                    phone_clean = re.sub(r'\D', '', phone)
-                    if query_digits == phone_clean:
-                        _notify_owner(owner_id, query)
-                        return True
-                    if query.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').replace('+', '') == phone_clean:
-                        _notify_owner(owner_id, query)
-                        return True
-                
-                # Проверка ФИО
-                if fio:
-                    fio_lower = fio.lower()
-                    if query_clean == fio_lower:
-                        _notify_owner(owner_id, query)
-                        return True
-                    fio_parts = fio_lower.split()
-                    query_parts = query_clean.split()
-                    if len(fio_parts) >= 2 and len(query_parts) >= 2:
-                        if fio_parts[0] == query_parts[0] and fio_parts[1] == query_parts[1]:
-                            _notify_owner(owner_id, query)
-                            return True
-                    if fio_parts and query_parts:
-                        if fio_parts[0] == query_parts[0]:
-                            _notify_owner(owner_id, query)
-                            return True
-                
-                # Проверка username
-                if username and username != "нет":
-                    username_clean = username.lower()
-                    query_username = query_clean.replace('@', '').strip()
-                    if query_username == username_clean:
-                        _notify_owner(owner_id, query)
-                        return True
-                    if query_clean == f"@{username_clean}":
-                        _notify_owner(owner_id, query)
-                        return True
-                
-                # Проверка ID
+            if username and username != "нет":
+                username_clean = username.lower()
+                query_username = query_clean.replace('@', '').strip()
+                if query_username == username_clean:
+                    _notify_owner(owner_id, query)
+                    return True
+                if query_clean == f"@{username_clean}":
+                    _notify_owner(owner_id, query)
+                    return True
+            
+            if owner_id:
                 try:
                     if query.isdigit():
                         if int(query) == owner_id:
@@ -663,16 +601,6 @@ async def get_telegram_profile(query: str, query_type: str) -> dict:
 
 async def search_telegram_id(query: str) -> dict:
     try:
-        # Проверяем скрытые данные ТОЛЬКО для telegram_id
-        if check_hidden_data(query, "telegram_id"):
-            return {
-                "query": query,
-                "type": "telegram_id",
-                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
-                "total_results": 0,
-                "hidden": True
-            }
-        
         profile = await get_telegram_profile(query, "telegram_id")
         if not profile.get("found"):
             return {
@@ -680,6 +608,15 @@ async def search_telegram_id(query: str) -> dict:
                 "type": "telegram_id",
                 "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
                 "total_results": 0
+            }
+        
+        if check_hidden_data(query):
+            return {
+                "query": query,
+                "type": "telegram_id",
+                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
+                "total_results": 0,
+                "hidden": True
             }
         
         return {
@@ -714,17 +651,6 @@ async def search_telegram_id(query: str) -> dict:
 async def search_username(query: str) -> dict:
     try:
         clean = query.replace('@', '').strip()
-        
-        # Проверяем скрытые данные ТОЛЬКО для username
-        if check_hidden_data(query, "username"):
-            return {
-                "query": query,
-                "type": "username",
-                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
-                "total_results": 0,
-                "hidden": True
-            }
-        
         profile = await get_telegram_profile(clean, "username")
         
         if not profile.get("found"):
@@ -733,6 +659,15 @@ async def search_username(query: str) -> dict:
                 "type": "username",
                 "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
                 "total_results": 0
+            }
+        
+        if check_hidden_data(query):
+            return {
+                "query": query,
+                "type": "username",
+                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
+                "total_results": 0,
+                "hidden": True
             }
         
         return {
@@ -952,8 +887,7 @@ async def global_lookup(query: str) -> dict:
     query = query.strip()
     qtype = detect_query_type(query)
     
-    # Проверяем скрытые данные для глобального поиска (проверяем ВСЁ)
-    if check_hidden_data(query, "global"):
+    if check_hidden_data(query):
         return {
             "query": query,
             "type": qtype,
@@ -1821,6 +1755,222 @@ def list_hide_requests(call):
     except Exception as e:
         safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
 
+# ==================== АДМИН-КОМАНДЫ ====================
+
+@bot.message_handler(commands=['adminhelp'])
+def admin_help_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    
+    help_text = (
+        "👑 Админ-команды Глаз Исиды\n\n"
+        "📌 Управление пользователями\n"
+        "/give <кол-во> <user_id> — выдать запросы\n"
+        "/take <кол-во> <user_id> — забрать запросы\n"
+        "/users — список пользователей\n"
+        "/hide <user_id> — раскрыть скрытые данные\n\n"
+        "📌 Управление ботом\n"
+        "/tech on/off — техперерыв\n"
+        "/stats — статистика бота\n"
+        "/broadcast <текст> — рассылка\n\n"
+        "📌 Скрытие данных\n"
+        "/requests — список заявок на скрытие\n"
+        "/hide <user_id> — раскрыть данные\n\n"
+        "👁️ Глаз Исиды — OSINT\n"
+        "🛡️ @Arhapov"
+    )
+    safe_send_message(message.chat.id, help_text)
+
+@bot.message_handler(commands=['tech'])
+def tech_command(message):
+    global TECH_MODE
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        safe_send_message(message.chat.id, "❗ /tech on/off")
+        return
+    if args[1].lower() == "on":
+        TECH_MODE = True
+        safe_send_message(message.chat.id, "🔧 Техперерыв ВКЛЮЧЁН")
+    elif args[1].lower() == "off":
+        TECH_MODE = False
+        safe_send_message(message.chat.id, "✅ Техперерыв ВЫКЛЮЧЕН")
+    else:
+        safe_send_message(message.chat.id, "❗ /tech on или /tech off")
+
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        total_users = cur.fetchone()[0]
+        cur.execute("SELECT SUM(searches_today + searches_extra) FROM users")
+        total_searches = cur.fetchone()[0] or 0
+        cur.execute("SELECT COUNT(*) FROM hide_requests WHERE status = 'pending'")
+        pending_requests = cur.fetchone()[0] or 0
+        conn.close()
+        safe_send_message(
+            message.chat.id,
+            f"📊 Статистика бота\n\n"
+            f"👥 Всего пользователей: {total_users}\n"
+            f"🔍 Всего поисков: {total_searches}\n"
+            f"📋 Заявок на скрытие: {pending_requests}\n"
+            f"👑 Админ: @Arhapov"
+        )
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    text = message.text.replace('/broadcast', '').strip()
+    if not text:
+        safe_send_message(message.chat.id, "❗ /broadcast <текст сообщения>")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users")
+        users = cur.fetchall()
+        conn.close()
+        sent = 0
+        for user in users:
+            try:
+                safe_send_message(user[0], f"📢 Рассылка\n\n{text}")
+                sent += 1
+                time.sleep(0.05)
+            except:
+                continue
+        safe_send_message(message.chat.id, f"✅ Рассылка отправлена {sent} пользователям.")
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['requests'])
+def requests_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            safe_send_message(message.chat.id, "📋 Нет активных заявок.")
+            return
+        text = "📋 Заявки на скрытие данных\n\n"
+        for row in rows[:10]:
+            req_id, user_id, username, phone, fio, created = row
+            text += (
+                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
+                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
+                f"   🕐 {created[:16]}\n\n"
+            )
+        markup = types.InlineKeyboardMarkup()
+        for row in rows[:5]:
+            req_id = row[0]
+            markup.add(
+                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
+                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
+            )
+        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
+        safe_send_message(message.chat.id, text, reply_markup=markup)
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['hide'])
+def hide_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        safe_send_message(message.chat.id, "❗ /hide <user_id>")
+        return
+    target_id = int(args[1])
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM hidden_data WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        safe_send_message(
+            message.chat.id,
+            f"✅ Данные пользователя {target_id} раскрыты.\n\n🔓 Теперь его данные снова видны в поиске."
+        )
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.message_handler(commands=['give'])
+def give_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            safe_send_message(message.chat.id, "❗ /give <кол-во> <user_id>")
+            return
+        amount = int(args[1])
+        target_id = int(args[2])
+        user = get_user(target_id)
+        user["searches_today"] = max(0, user["searches_today"] - amount)
+        update_user(target_id, user)
+        safe_send_message(message.chat.id, f"✅ Выдано {amount} запросов пользователю {target_id}.")
+    except:
+        safe_send_message(message.chat.id, "⚠️ Ошибка. /give <кол-во> <user_id>")
+
+@bot.message_handler(commands=['take'])
+def take_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            safe_send_message(message.chat.id, "❗ /take <кол-во> <user_id>")
+            return
+        amount = int(args[1])
+        target_id = int(args[2])
+        user = get_user(target_id)
+        user["searches_extra"] = max(0, user["searches_extra"] - amount)
+        update_user(target_id, user)
+        safe_send_message(message.chat.id, f"✅ Забрано {amount} запросов у пользователя {target_id}.")
+    except:
+        safe_send_message(message.chat.id, "⚠️ Ошибка. /take <кол-во> <user_id>")
+
+@bot.message_handler(commands=['users'])
+def users_command(message):
+    if message.from_user.id != ADMIN_ID:
+        safe_send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, username, searches_today, searches_extra FROM users ORDER BY searches_today DESC")
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            safe_send_message(message.chat.id, "📊 Нет пользователей.")
+            return
+        text = "📊 Список пользователей\n\n"
+        for user_id, username, today, extra in rows[:20]:
+            total = (5 - today) + extra
+            text += f"• {user_id} — @{username or 'нет'} | запросов: {total}\n"
+        safe_send_message(message.chat.id, text)
+    except Exception as e:
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
 # ==================== ФУНКЦИЯ ВЫПОЛНЕНИЯ ПОИСКА ====================
 
 def run_search_sync(chat_id, user_id, query, mode):
@@ -2345,6 +2495,79 @@ def global_callback_handler(call):
         
     except Exception as e:
         logger.error(f"❌ Global callback error: {e}")
+
+# ==================== ОБРАБОТЧИК ТЕКСТА (С ФИЛЬТРОМ - НЕ КОМАНДЫ) ====================
+
+# Функция-фильтр: пропускаем только сообщения, которые НЕ начинаются с /
+def is_not_command(message):
+    return not message.text.startswith('/')
+
+@bot.message_handler(func=is_not_command)
+def handle_text(message):
+    try:
+        text = message.text.strip()
+        
+        if not text:
+            return
+        
+        if TECH_MODE and message.from_user.id != ADMIN_ID:
+            safe_send_message(message.chat.id, "🔧 Бот на техническом обслуживании\n\n⏰ Вернёмся через несколько минут!")
+            return
+        
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        
+        if user_search_mode.get(user_id):
+            mode = user_search_mode.pop(user_id)
+            run_search_sync(chat_id, user_id, text, mode)
+            return
+        
+        if check_hidden_data(text):
+            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+            return
+        
+        is_digits = re.match(r'^[\d\s\-()+.]+$', text)
+        
+        if is_digits:
+            markup = get_choice_keyboard_for_numbers()
+            user_state[f"search_query_{user_id}"] = text
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
+        else:
+            markup = get_choice_keyboard_for_text()
+            user_state[f"search_query_{user_id}"] = text
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
+        
+    except Exception as e:
+        logger.error(f"Handle text error: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    try:
+        logger.info(f"Start command from {message.from_user.id}")
+        remaining = get_remaining(message.from_user.id)
+        user_id = message.from_user.id
+        user_state.pop(user_id, None)
+        user_state.pop(f"search_query_{user_id}", None)
+        user_search_mode.pop(user_id, None)
+        
+        safe_send_message(
+            message.chat.id,
+            f"👁️ **Глаз Исиды — OSINT**\n\n"
+            f"🕵️ Привет, {message.from_user.first_name}!\n"
+            f"⚡ Глубокий OSINT-поиск\n"
+            f"🛡️ Множество источников\n"
+            f"🔒 Защита скрытых данных\n\n"
+            f"📊 Осталось: {remaining}/5\n\n"
+            f"📌 **Выбери действие:**",
+            reply_markup=main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Start error: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 # ==================== ЗАПУСК ====================
 

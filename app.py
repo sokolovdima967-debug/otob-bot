@@ -388,9 +388,13 @@ def get_user_data(user_id: int) -> dict:
             "phone": None
         }
 
-# ==================== ПРОВЕРКА СКРЫТЫХ ДАННЫХ ====================
+# ==================== ПРОВЕРКА СКРЫТЫХ ДАННЫХ (С УЧЁТОМ ТИПА) ====================
 
-def check_hidden_data(query: str) -> bool:
+def check_hidden_data(query: str, qtype: str = None) -> bool:
+    """
+    Проверяет, скрыты ли данные, с учётом типа запроса
+    qtype: 'phone', 'username', 'telegram_id', 'fio', 'email', 'ip', 'domain', 'text', 'global'
+    """
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -407,42 +411,100 @@ def check_hidden_data(query: str) -> bool:
         for row in hidden_rows:
             owner_id, username, phone, fio = row
             
-            if phone:
-                phone_clean = re.sub(r'\D', '', phone)
-                if query_digits == phone_clean:
-                    _notify_owner(owner_id, query)
-                    return True
-                if query.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').replace('+', '') == phone_clean:
-                    _notify_owner(owner_id, query)
-                    return True
+            # ===== ПРОВЕРКА ПО ТИПУ ЗАПРОСА =====
             
-            if fio:
-                fio_lower = fio.lower()
-                if query_clean == fio_lower:
-                    _notify_owner(owner_id, query)
-                    return True
-                fio_parts = fio_lower.split()
-                query_parts = query_clean.split()
-                if len(fio_parts) >= 2 and len(query_parts) >= 2:
-                    if fio_parts[0] == query_parts[0] and fio_parts[1] == query_parts[1]:
+            # 1. Если ищем по телефону - проверяем только телефон
+            if qtype == "phone":
+                if phone:
+                    phone_clean = re.sub(r'\D', '', phone)
+                    if query_digits == phone_clean:
                         _notify_owner(owner_id, query)
                         return True
-                if fio_parts and query_parts:
-                    if fio_parts[0] == query_parts[0]:
+                continue
+            
+            # 2. Если ищем по username - проверяем только username
+            if qtype == "username":
+                if username and username != "нет":
+                    username_clean = username.lower()
+                    query_username = query_clean.replace('@', '').strip()
+                    if query_username == username_clean:
                         _notify_owner(owner_id, query)
                         return True
+                    if query_clean == f"@{username_clean}":
+                        _notify_owner(owner_id, query)
+                        return True
+                continue
             
-            if username and username != "нет":
-                username_clean = username.lower()
-                query_username = query_clean.replace('@', '').strip()
-                if query_username == username_clean:
+            # 3. Если ищем по Telegram ID - проверяем только ID
+            if qtype == "telegram_id":
+                try:
+                    if query.isdigit():
+                        if int(query) == owner_id:
+                            _notify_owner(owner_id, query)
+                            return True
+                except:
+                    pass
+                if str(owner_id) == query_clean:
                     _notify_owner(owner_id, query)
                     return True
-                if query_clean == f"@{username_clean}":
-                    _notify_owner(owner_id, query)
-                    return True
+                continue
             
-            if owner_id:
+            # 4. Если ищем по ФИО - проверяем только ФИО
+            if qtype == "fio":
+                if fio:
+                    fio_lower = fio.lower()
+                    if query_clean == fio_lower:
+                        _notify_owner(owner_id, query)
+                        return True
+                    fio_parts = fio_lower.split()
+                    query_parts = query_clean.split()
+                    if len(fio_parts) >= 2 and len(query_parts) >= 2:
+                        if fio_parts[0] == query_parts[0] and fio_parts[1] == query_parts[1]:
+                            _notify_owner(owner_id, query)
+                            return True
+                continue
+            
+            # 5. Для глобального поиска - проверяем ВСЁ
+            if qtype in ["global", "text", None]:
+                # Проверка телефона
+                if phone:
+                    phone_clean = re.sub(r'\D', '', phone)
+                    if query_digits == phone_clean:
+                        _notify_owner(owner_id, query)
+                        return True
+                    if query.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').replace('+', '') == phone_clean:
+                        _notify_owner(owner_id, query)
+                        return True
+                
+                # Проверка ФИО
+                if fio:
+                    fio_lower = fio.lower()
+                    if query_clean == fio_lower:
+                        _notify_owner(owner_id, query)
+                        return True
+                    fio_parts = fio_lower.split()
+                    query_parts = query_clean.split()
+                    if len(fio_parts) >= 2 and len(query_parts) >= 2:
+                        if fio_parts[0] == query_parts[0] and fio_parts[1] == query_parts[1]:
+                            _notify_owner(owner_id, query)
+                            return True
+                    if fio_parts and query_parts:
+                        if fio_parts[0] == query_parts[0]:
+                            _notify_owner(owner_id, query)
+                            return True
+                
+                # Проверка username
+                if username and username != "нет":
+                    username_clean = username.lower()
+                    query_username = query_clean.replace('@', '').strip()
+                    if query_username == username_clean:
+                        _notify_owner(owner_id, query)
+                        return True
+                    if query_clean == f"@{username_clean}":
+                        _notify_owner(owner_id, query)
+                        return True
+                
+                # Проверка ID
                 try:
                     if query.isdigit():
                         if int(query) == owner_id:
@@ -601,6 +663,16 @@ async def get_telegram_profile(query: str, query_type: str) -> dict:
 
 async def search_telegram_id(query: str) -> dict:
     try:
+        # Проверяем скрытые данные ТОЛЬКО для telegram_id
+        if check_hidden_data(query, "telegram_id"):
+            return {
+                "query": query,
+                "type": "telegram_id",
+                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
+                "total_results": 0,
+                "hidden": True
+            }
+        
         profile = await get_telegram_profile(query, "telegram_id")
         if not profile.get("found"):
             return {
@@ -608,15 +680,6 @@ async def search_telegram_id(query: str) -> dict:
                 "type": "telegram_id",
                 "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
                 "total_results": 0
-            }
-        
-        if check_hidden_data(query):
-            return {
-                "query": query,
-                "type": "telegram_id",
-                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
-                "total_results": 0,
-                "hidden": True
             }
         
         return {
@@ -651,6 +714,17 @@ async def search_telegram_id(query: str) -> dict:
 async def search_username(query: str) -> dict:
     try:
         clean = query.replace('@', '').strip()
+        
+        # Проверяем скрытые данные ТОЛЬКО для username
+        if check_hidden_data(query, "username"):
+            return {
+                "query": query,
+                "type": "username",
+                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
+                "total_results": 0,
+                "hidden": True
+            }
+        
         profile = await get_telegram_profile(clean, "username")
         
         if not profile.get("found"):
@@ -659,15 +733,6 @@ async def search_username(query: str) -> dict:
                 "type": "username",
                 "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
                 "total_results": 0
-            }
-        
-        if check_hidden_data(query):
-            return {
-                "query": query,
-                "type": "username",
-                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
-                "total_results": 0,
-                "hidden": True
             }
         
         return {
@@ -887,7 +952,8 @@ async def global_lookup(query: str) -> dict:
     query = query.strip()
     qtype = detect_query_type(query)
     
-    if check_hidden_data(query):
+    # Проверяем скрытые данные для глобального поиска (проверяем ВСЁ)
+    if check_hidden_data(query, "global"):
         return {
             "query": query,
             "type": qtype,
@@ -1924,7 +1990,7 @@ def give_command(message):
         amount = int(args[1])
         target_id = int(args[2])
         user = get_user(target_id)
-        user["searches_today"] = max(0, user["searches_today"] - amount)
+        user["searches_extra"] = user.get("searches_extra", 0) + amount
         update_user(target_id, user)
         safe_send_message(message.chat.id, f"✅ Выдано {amount} запросов пользователю {target_id}.")
     except:
@@ -1943,7 +2009,7 @@ def take_command(message):
         amount = int(args[1])
         target_id = int(args[2])
         user = get_user(target_id)
-        user["searches_extra"] = max(0, user["searches_extra"] - amount)
+        user["searches_extra"] = max(0, user.get("searches_extra", 0) - amount)
         update_user(target_id, user)
         safe_send_message(message.chat.id, f"✅ Забрано {amount} запросов у пользователя {target_id}.")
     except:
@@ -2522,9 +2588,27 @@ def handle_text(message):
             run_search_sync(chat_id, user_id, text, mode)
             return
         
-        if check_hidden_data(text):
-            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
-            return
+        # Определяем тип запроса для проверки скрытых данных
+        qtype = detect_query_type(text)
+        
+        # Проверяем скрытые данные ТОЛЬКО для соответствующих типов
+        # Для чисел - проверяем телефон, для текста - проверяем всё в глобальном режиме
+        if qtype == "phone":
+            if check_hidden_data(text, "phone"):
+                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+                return
+        elif qtype == "username":
+            if check_hidden_data(text, "username"):
+                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+                return
+        elif qtype == "telegram_id":
+            if check_hidden_data(text, "telegram_id"):
+                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+                return
+        elif qtype == "fio":
+            if check_hidden_data(text, "fio"):
+                safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+                return
         
         is_digits = re.match(r'^[\d\s\-()+.]+$', text)
         

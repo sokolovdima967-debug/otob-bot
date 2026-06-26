@@ -407,7 +407,7 @@ def check_hidden_data(query: str) -> bool:
         for row in hidden_rows:
             owner_id, username, phone, fio = row
             
-            # ===== ПРОВЕРКА ПО ID (САМАЯ ВАЖНАЯ) =====
+            # ===== ПРОВЕРКА ПО ID =====
             if owner_id:
                 if str(owner_id) == query_clean:
                     _notify_owner(owner_id, query)
@@ -471,7 +471,7 @@ def _notify_owner(owner_id: int, query: str):
             f"`{query}`\n\n"
             f"🛡️ Ваши данные защищены!\n"
             f"🔒 Информация не была передана.\n\n"
-            f"👁️ @Arhapov"
+            f"👁️ @Afipov"
         )
     except Exception as e:
         logger.error(f"Notify owner error: {e}")
@@ -596,7 +596,7 @@ async def get_telegram_profile(query: str, query_type: str) -> dict:
         logger.error(f"Get telegram profile error: {e}")
         return {"found": False, "error": str(e)[:100]}
 
-# ==================== ФУНКЦИИ ПОИСКА (С ПРОВЕРКОЙ СКРЫТИЯ) ====================
+# ==================== ФУНКЦИИ ПОИСКА ====================
 
 async def search_telegram_id(query: str) -> dict:
     try:
@@ -672,7 +672,7 @@ async def search_username(query: str) -> dict:
                 "total_results": 0
             }
         
-        # ===== ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПО ID И USERNAME ИЗ ПРОФИЛЯ =====
+        # ===== ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА =====
         if check_hidden_data(str(profile["user_id"])) or check_hidden_data(profile["username"]):
             return {
                 "query": query,
@@ -1068,7 +1068,7 @@ def format_telegram_result(data: dict) -> str:
     text += f"📝 **Bio:** {telegram.get('bio', '—')}\n\n"
     
     text += "👁️ **Глаз Исиды — OSINT**\n"
-    text += "🛡️ @Arhapov"
+    text += "🛡️ @Afipov"
     
     return text
 
@@ -1130,7 +1130,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         <h1 style="color:#cc3333;">Данные скрыты</h1>
         <p style="color:#8a6a6a; margin-top:20px;">Этот пользователь скрыл свои данные от поиска.</p>
         <div class="footer">
-            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Arhapov" target="_blank">@Arhapov</a>
+            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Afipov" target="_blank">@Afipov</a>
         </div>
     </div>
 </body>
@@ -1267,7 +1267,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
         </div>
         
         <div class="footer">
-            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Arhapov" target="_blank">@Arhapov</a>
+            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Afipov" target="_blank">@Afipov</a>
         </div>
     </div>
 </body>
@@ -1524,7 +1524,7 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
     
     html += f"""
         <div class="footer">
-            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Arhapov" target="_blank">@Arhapov</a>
+            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Afipov" target="_blank">@Afipov</a>
         </div>
     </div>
 </body>
@@ -1845,7 +1845,7 @@ def admin_help_command(message):
         "/requests — список заявок на скрытие\n"
         "/hide <user_id> — раскрыть данные\n\n"
         "👁️ Глаз Исиды — OSINT\n"
-        "🛡️ @Arhapov"
+        "🛡️ @Afipov"
     )
     safe_send_message(message.chat.id, help_text)
 
@@ -1889,7 +1889,7 @@ def stats_command(message):
             f"👥 Всего пользователей: {total_users}\n"
             f"🔍 Всего поисков: {total_searches}\n"
             f"📋 Заявок на скрытие: {pending_requests}\n"
-            f"👑 Админ: @Arhapov"
+            f"👑 Админ: @Afipov"
         )
     except Exception as e:
         safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
@@ -2108,7 +2108,7 @@ async def run_global_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = f"👁️ OSINT-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        caption = f"👁️ OSINT-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Afipov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -2142,7 +2142,7 @@ async def run_phone_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = f"📱 ОТЧЁТ ПО НОМЕРУ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        caption = f"📱 ОТЧЁТ ПО НОМЕРУ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Afipov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -2197,7 +2197,7 @@ async def run_ip_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = f"🌐 IP-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        caption = f"🌐 IP-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Afipov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -2231,7 +2231,7 @@ async def run_domain_search(chat_id, user_id, query):
         f.write(html)
     
     with open(filename, "rb") as f:
-        caption = f"🌐 ДОМЕН-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        caption = f"🌐 ДОМЕН-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Afipov"
         if len(caption) > 1000:
             caption = caption[:997] + "..."
         bot.send_document(chat_id, f, caption=caption, parse_mode=None)
@@ -2299,7 +2299,7 @@ def main_menu_keyboard():
     )
     
     markup.add(
-        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
+        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Afipov")
     )
     
     return markup
@@ -2447,7 +2447,7 @@ def global_callback_handler(call):
                 "📊 **Лимит:** 5 поисков в день\n"
                 "👑 **Админ:** безлимитный доступ\n"
                 "🔒 **Скрытие данных:** отправь заявку админу\n\n"
-                "🛡️ @Arhapov",
+                "🛡️ @Afipov",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 ),
@@ -2598,7 +2598,7 @@ def handle_text(message):
             return
         
         if check_hidden_data(text):
-            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Afipov")
             return
         
         is_digits = re.match(r'^[\d\s\-()+.]+$', text)
@@ -2651,8 +2651,9 @@ if __name__ == "__main__":
     migrate_db()
     
     logger.info("👁️ Глаз Исиды — OSINT запускается...")
-    logger.info("🛡️ Канал: @Arhapov")
+    logger.info("🛡️ Канал: @Afipov")
     logger.info("⚡ Таймаут поиска: 120 секунд")
+    logger.info("👁️ С поддержкой Мирослава Афипова")
     
     try:
         bot.remove_webhook()

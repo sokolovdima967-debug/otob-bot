@@ -407,6 +407,19 @@ def check_hidden_data(query: str) -> bool:
         for row in hidden_rows:
             owner_id, username, phone, fio = row
             
+            # ===== ПРОВЕРКА ПО ID (САМАЯ ВАЖНАЯ) =====
+            if owner_id:
+                if str(owner_id) == query_clean:
+                    _notify_owner(owner_id, query)
+                    return True
+                try:
+                    if query.isdigit() and int(query) == owner_id:
+                        _notify_owner(owner_id, query)
+                        return True
+                except:
+                    pass
+            
+            # ===== ПРОВЕРКА ПО ТЕЛЕФОНУ =====
             if phone:
                 phone_clean = re.sub(r'\D', '', phone)
                 if query_digits == phone_clean:
@@ -416,6 +429,7 @@ def check_hidden_data(query: str) -> bool:
                     _notify_owner(owner_id, query)
                     return True
             
+            # ===== ПРОВЕРКА ПО ФИО =====
             if fio:
                 fio_lower = fio.lower()
                 if query_clean == fio_lower:
@@ -432,6 +446,7 @@ def check_hidden_data(query: str) -> bool:
                         _notify_owner(owner_id, query)
                         return True
             
+            # ===== ПРОВЕРКА ПО USERNAME =====
             if username and username != "нет":
                 username_clean = username.lower()
                 query_username = query_clean.replace('@', '').strip()
@@ -439,18 +454,6 @@ def check_hidden_data(query: str) -> bool:
                     _notify_owner(owner_id, query)
                     return True
                 if query_clean == f"@{username_clean}":
-                    _notify_owner(owner_id, query)
-                    return True
-            
-            if owner_id:
-                try:
-                    if query.isdigit():
-                        if int(query) == owner_id:
-                            _notify_owner(owner_id, query)
-                            return True
-                except:
-                    pass
-                if str(owner_id) == query_clean:
                     _notify_owner(owner_id, query)
                     return True
         
@@ -593,19 +596,11 @@ async def get_telegram_profile(query: str, query_type: str) -> dict:
         logger.error(f"Get telegram profile error: {e}")
         return {"found": False, "error": str(e)[:100]}
 
-# ==================== ФУНКЦИИ ПОИСКА ====================
+# ==================== ФУНКЦИИ ПОИСКА (С ПРОВЕРКОЙ СКРЫТИЯ) ====================
 
 async def search_telegram_id(query: str) -> dict:
     try:
-        profile = await get_telegram_profile(query, "telegram_id")
-        if not profile.get("found"):
-            return {
-                "query": query,
-                "type": "telegram_id",
-                "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
-                "total_results": 0
-            }
-        
+        # ===== СНАЧАЛА ПРОВЕРЯЕМ СКРЫТИЕ =====
         if check_hidden_data(query):
             return {
                 "query": query,
@@ -613,6 +608,15 @@ async def search_telegram_id(query: str) -> dict:
                 "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
                 "total_results": 0,
                 "hidden": True
+            }
+        
+        profile = await get_telegram_profile(query, "telegram_id")
+        if not profile.get("found"):
+            return {
+                "query": query,
+                "type": "telegram_id",
+                "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
+                "total_results": 0
             }
         
         return {
@@ -647,6 +651,17 @@ async def search_telegram_id(query: str) -> dict:
 async def search_username(query: str) -> dict:
     try:
         clean = query.replace('@', '').strip()
+        
+        # ===== СНАЧАЛА ПРОВЕРЯЕМ СКРЫТИЕ =====
+        if check_hidden_data(query) or check_hidden_data(clean):
+            return {
+                "query": query,
+                "type": "username",
+                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
+                "total_results": 0,
+                "hidden": True
+            }
+        
         profile = await get_telegram_profile(clean, "username")
         
         if not profile.get("found"):
@@ -657,7 +672,8 @@ async def search_username(query: str) -> dict:
                 "total_results": 0
             }
         
-        if check_hidden_data(query):
+        # ===== ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА ПО ID И USERNAME ИЗ ПРОФИЛЯ =====
+        if check_hidden_data(str(profile["user_id"])) or check_hidden_data(profile["username"]):
             return {
                 "query": query,
                 "type": "username",
@@ -2252,43 +2268,36 @@ async def run_username_search(chat_id, user_id, query):
 def main_menu_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    # Первый ряд
     markup.add(
         types.InlineKeyboardButton("🌍 ГЛОБАЛЬНЫЙ", callback_data="global_search"),
         types.InlineKeyboardButton("📱 TELEGRAM", callback_data="telegram_search")
     )
     
-    # Второй ряд
     markup.add(
         types.InlineKeyboardButton("📞 ТЕЛЕФОН", callback_data="phone_search"),
         types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
     )
     
-    # Третий ряд - убраны Username и Telegram ID
     markup.add(
         types.InlineKeyboardButton("🌐 IP", callback_data="ip_search"),
         types.InlineKeyboardButton("🌍 ДОМЕН", callback_data="domain_search")
     )
     
-    # Четвертый ряд
     markup.add(
         types.InlineKeyboardButton("🌍 ГЕОИНТ", callback_data="geoint_search"),
         types.InlineKeyboardButton("🖼️ МЕТАДАННЫЕ", callback_data="metadata_search")
     )
     
-    # Пятый ряд
     markup.add(
         types.InlineKeyboardButton("🔒 СКРЫТЬ ДАННЫЕ", callback_data="hide_data"),
         types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile")
     )
     
-    # Шестой ряд
     markup.add(
         types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance"),
         types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help")
     )
     
-    # Седьмой ряд
     markup.add(
         types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
     )

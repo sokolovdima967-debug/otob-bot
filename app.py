@@ -2169,6 +2169,15 @@ async def run_global_search(chat_id, user_id, query):
     total = data.get("total_results", 0)
     remaining = use_search(user_id)
     
+    # ===== ПРОВЕРКА НА СКРЫТИЕ =====
+    if data.get("hidden") or data.get("sources", {}).get("hidden"):
+        safe_edit_message(chat_id, msg.message_id, "🔒 Данные скрыты по запросу владельца")
+        try:
+            bot.delete_message(chat_id, msg.message_id)
+        except:
+            pass
+        return
+    
     if data.get("type") in ["username", "telegram_id"]:
         text = format_telegram_result(data)
         safe_send_message(chat_id, text, parse_mode="Markdown")
@@ -2177,6 +2186,12 @@ async def run_global_search(chat_id, user_id, query):
         except:
             pass
         return
+    
+    # ===== ДЛЯ ТЕЛЕФОНА — ТЕКСТОВЫЙ ВЫВОД (опционально) =====
+    if data.get("type") == "phone":
+        # Можно добавить текстовый вывод, но HTML всё равно создаётся
+        # Если хочешь только HTML — просто удали этот блок
+        pass
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"
     html = generate_html_report(query, data, report_id)

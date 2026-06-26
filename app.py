@@ -1470,7 +1470,10 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 @bot.callback_query_handler(func=lambda call: call.data == "hide_data")
 def hide_data_callback(call):
     user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
     
     user_data = get_user_data(user_id)
     
@@ -1497,7 +1500,10 @@ def hide_data_callback(call):
 @bot.callback_query_handler(func=lambda call: call.data == "send_contact_hide")
 def send_contact_hide(call):
     user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
     
     markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True, one_time_keyboard=True)
     contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
@@ -1620,11 +1626,17 @@ def process_hide_fio(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hide_'))
 def approve_hide(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        try:
+            bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        except:
+            pass
         return
     
     request_id = int(call.data.split('_')[2])
-    bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
+    try:
+        bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
+    except:
+        pass
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -1664,11 +1676,17 @@ def approve_hide(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('reject_hide_'))
 def reject_hide(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        try:
+            bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        except:
+            pass
         return
     
     request_id = int(call.data.split('_')[2])
-    bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
+    try:
+        bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
+    except:
+        pass
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -1693,10 +1711,16 @@ def reject_hide(call):
 @bot.callback_query_handler(func=lambda call: call.data == "list_hide_requests")
 def list_hide_requests(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        try:
+            bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        except:
+            pass
         return
     
-    bot.answer_callback_query(call.id)
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -2174,55 +2198,47 @@ async def run_username_search(chat_id, user_id, query):
     text += f"\n\n⏱️ Время: {elapsed:.1f} сек\n🔍 Осталось: {remaining}/5"
     safe_edit_message(chat_id, msg.message_id, text, parse_mode="Markdown")
 
-# ==================== НОВОЕ МЕНЮ ====================
+# ==================== МЕНЮ ====================
 
 def main_menu_keyboard():
     """Главное меню со всеми функциями"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    # Первый ряд - основные функции
     markup.add(
         types.InlineKeyboardButton("🌍 ГЛОБАЛЬНЫЙ", callback_data="global_search"),
         types.InlineKeyboardButton("📱 TELEGRAM", callback_data="telegram_search")
     )
     
-    # Второй ряд
     markup.add(
         types.InlineKeyboardButton("📞 ТЕЛЕФОН", callback_data="phone_search"),
         types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
     )
     
-    # Третий ряд
     markup.add(
         types.InlineKeyboardButton("👤 USERNAME", callback_data="username_search"),
         types.InlineKeyboardButton("🆔 TELEGRAM ID", callback_data="telegram_id_search")
     )
     
-    # Четвертый ряд
     markup.add(
         types.InlineKeyboardButton("🌐 IP", callback_data="ip_search"),
         types.InlineKeyboardButton("🌍 ДОМЕН", callback_data="domain_search")
     )
     
-    # Пятый ряд - дополнительные
     markup.add(
         types.InlineKeyboardButton("🌍 ГЕОИНТ", callback_data="geoint_search"),
         types.InlineKeyboardButton("🖼️ МЕТАДАННЫЕ", callback_data="metadata_search")
     )
     
-    # Шестой ряд - настройки
     markup.add(
         types.InlineKeyboardButton("🔒 СКРЫТЬ ДАННЫЕ", callback_data="hide_data"),
         types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile")
     )
     
-    # Седьмой ряд
     markup.add(
         types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance"),
         types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help")
     )
     
-    # Восьмой ряд - канал
     markup.add(
         types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
     )
@@ -2234,7 +2250,11 @@ def main_menu_keyboard():
 @bot.callback_query_handler(func=lambda call: True)
 def global_callback_handler(call):
     try:
-        bot.answer_callback_query(call.id)
+        # Безопасно отвечаем на callback
+        try:
+            bot.answer_callback_query(call.id)
+        except:
+            pass
         
         data = call.data
         
@@ -2244,15 +2264,13 @@ def global_callback_handler(call):
             query = user_state.get(f"search_query_{user_id}", "")
             mode = data.replace('search_', '')
             
-            bot.answer_callback_query(call.id, f"🔍 Поиск в режиме: {mode}")
             user_search_mode[user_id] = mode
             
             run_search_sync(call.message.chat.id, user_id, query, mode)
             return
         
-        # ===== TELEGRAM ПОИСК (выбор подрежима) =====
+        # ===== TELEGRAM ПОИСК =====
         if data == "telegram_search":
-            user_id = call.from_user.id
             markup = types.InlineKeyboardMarkup(row_width=2)
             markup.add(
                 types.InlineKeyboardButton("👤 По username", callback_data="telegram_username_mode"),
@@ -2265,9 +2283,8 @@ def global_callback_handler(call):
                 call.message.message_id,
                 "📱 **ПОИСК В TELEGRAM**\n\n"
                 "Выбери способ поиска:\n\n"
-                "👤 **По username** — введи никнейм (например: durov)\n"
-                "🆔 **По ID** — введи числовой ID\n\n"
-                "🔒 Данные скрытых пользователей блокируются",
+                "👤 **По username** — введи никнейм\n"
+                "🆔 **По ID** — введи числовой ID",
                 reply_markup=markup,
                 parse_mode="Markdown"
             )
@@ -2281,8 +2298,7 @@ def global_callback_handler(call):
                 call.message.message_id,
                 "👤 **ПОИСК ПО USERNAME**\n\n"
                 "Отправь username Telegram аккаунта.\n\n"
-                "Пример: @durov или durov\n\n"
-                "📌 Без @ или с @ — неважно",
+                "Пример: @durov или durov",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
                 ),
@@ -2298,40 +2314,6 @@ def global_callback_handler(call):
                 call.message.message_id,
                 "🆔 **ПОИСК ПО TELEGRAM ID**\n\n"
                 "Отправь числовой ID Telegram аккаунта.\n\n"
-                "Пример: 123456789\n\n"
-                "📌 ID можно узнать у бота @userinfobot",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                ),
-                parse_mode="Markdown"
-            )
-            return
-        
-        if data == "username_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "username"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "👤 **ПОИСК ПО USERNAME**\n\n"
-                "Отправь username для поиска.\n\n"
-                "Пример: username\n\n"
-                "🔍 Поиск в Telegram и DuckDuckGo",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                ),
-                parse_mode="Markdown"
-            )
-            return
-        
-        if data == "telegram_id_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "telegram_id"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "🆔 **ПОИСК ПО TELEGRAM ID**\n\n"
-                "Отправь числовой ID Telegram аккаунта.\n\n"
                 "Пример: 123456789",
                 reply_markup=types.InlineKeyboardMarkup().add(
                     types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
@@ -2340,24 +2322,7 @@ def global_callback_handler(call):
             )
             return
         
-        if data == "ip_search":
-            user_id = call.from_user.id
-            user_search_mode[user_id] = "ip"
-            safe_edit_message(
-                call.message.chat.id,
-                call.message.message_id,
-                "🌐 **ПОИСК ПО IP**\n\n"
-                "Отправь IP-адрес.\n\n"
-                "Пример: 8.8.8.8\n\n"
-                "🔍 Геолокация · Провайдер · ASN",
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-                ),
-                parse_mode="Markdown"
-            )
-            return
-        
-        # ===== МЕНЮ =====
+        # ===== ОБРАБОТЧИКИ МЕНЮ =====
         if data == "menu_back":
             safe_edit_message(
                 call.message.chat.id,
@@ -2497,6 +2462,56 @@ def global_callback_handler(call):
             )
             return
         
+        if data == "username_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "username"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "👤 **ПОИСК ПО USERNAME**\n\n"
+                "Отправь username для поиска.\n\n"
+                "Пример: username\n\n"
+                "🔍 Поиск в Telegram и DuckDuckGo",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                ),
+                parse_mode="Markdown"
+            )
+            return
+        
+        if data == "telegram_id_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "telegram_id"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "🆔 **ПОИСК ПО TELEGRAM ID**\n\n"
+                "Отправь числовой ID Telegram аккаунта.\n\n"
+                "Пример: 123456789",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                ),
+                parse_mode="Markdown"
+            )
+            return
+        
+        if data == "ip_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "ip"
+            safe_edit_message(
+                call.message.chat.id,
+                call.message.message_id,
+                "🌐 **ПОИСК ПО IP**\n\n"
+                "Отправь IP-адрес.\n\n"
+                "Пример: 8.8.8.8\n\n"
+                "🔍 Геолокация · Провайдер · ASN",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+                ),
+                parse_mode="Markdown"
+            )
+            return
+        
         if data == "domain_search":
             user_id = call.from_user.id
             user_search_mode[user_id] = "domain"
@@ -2545,10 +2560,6 @@ def global_callback_handler(call):
         
     except Exception as e:
         logger.error(f"❌ Global callback error: {e}")
-        try:
-            safe_send_message(call.message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
-        except:
-            pass
 
 # ==================== ОБРАБОТЧИК ТЕКСТА ====================
 
@@ -2556,6 +2567,10 @@ def global_callback_handler(call):
 def handle_text(message):
     try:
         text = message.text.strip()
+        
+        # ===== ИГНОРИРУЕМ КОМАНДЫ (начинаются с /) =====
+        if text.startswith('/'):
+            return
         
         if not text:
             return
@@ -2567,15 +2582,18 @@ def handle_text(message):
         user_id = message.from_user.id
         chat_id = message.chat.id
         
+        # ===== ЕСЛИ УСТАНОВЛЕН РЕЖИМ ПОИСКА =====
         if user_search_mode.get(user_id):
             mode = user_search_mode.pop(user_id)
             run_search_sync(chat_id, user_id, text, mode)
             return
         
+        # ===== ПРОВЕРКА НА СКРЫТЫЕ ДАННЫЕ =====
         if check_hidden_data(text):
             safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
             return
         
+        # ===== ОПРЕДЕЛЯЕМ ТИП ЗАПРОСА =====
         is_digits = re.match(r'^[\d\s\-()+.]+$', text)
         
         if is_digits:
@@ -2631,7 +2649,6 @@ if __name__ == "__main__":
     logger.info("📊 Множество источников")
     logger.info("🔄 Обход блокировок: curl_cffi")
     logger.info("🔒 Скрытие данных: бесплатно (заявка админу)")
-    logger.info("👁️ С поддержкой Архапова")
     
     try:
         bot.remove_webhook()

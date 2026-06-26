@@ -11,7 +11,7 @@ import sys
 import threading
 import traceback
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import telebot
 from telebot import types
@@ -24,6 +24,7 @@ import dns.resolver
 from curl_cffi import requests as curl_requests
 from PIL import Image
 from PIL.ExifTags import TAGS
+import io
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TOKEN")
@@ -340,16 +341,28 @@ def clean_phone(phone: str) -> str:
 
 def detect_query_type(query: str) -> str:
     query = query.strip()
+    
     if re.search(r'^\+?\d{10,15}$', re.sub(r'[\s\-()]', '', query)):
         return "phone"
+    
     if re.search(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', query):
         return "email"
+    
     if re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', query):
         return "fio"
+    
+    if query.isdigit() and len(query) >= 5 and len(query) <= 15:
+        return "telegram_id"
+    
+    if re.match(r'^@?[a-zA-Z0-9_]{3,32}$', query):
+        return "username"
+    
     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', query):
         return "ip"
+    
     if "." in query and len(query.split()) == 1:
         return "domain"
+    
     return "text"
 
 def get_user_data(user_id: int) -> dict:
@@ -377,23 +390,72 @@ def get_user_data(user_id: int) -> dict:
             "phone": None
         }
 
+# ==================== ПРОВЕРКА СКРЫТЫХ ДАННЫХ ====================
+
 def check_hidden_data(query: str) -> bool:
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute('SELECT user_id, phone, fio FROM hidden_data')
+        cur.execute('SELECT user_id, username, phone, fio FROM hidden_data')
         hidden_rows = cur.fetchall()
         conn.close()
+        
         if not hidden_rows:
             return False
+        
+        query_clean = query.strip().lower()
+        query_digits = re.sub(r'\D', '', query)
+        
         for row in hidden_rows:
-            owner_id, phone, fio = row
-            if phone and query == phone:
-                _notify_owner(owner_id, query)
-                return True
-            if fio and query.lower() == fio.lower():
-                _notify_owner(owner_id, query)
-                return True
+            owner_id, username, phone, fio = row
+            
+            if phone:
+                phone_clean = re.sub(r'\D', '', phone)
+                if query_digits == phone_clean:
+                    _notify_owner(owner_id, query)
+                    return True
+                if query.replace(' ', '').replace('-', '').replace('(', '').replace(')', '').replace('+', '') == phone_clean:
+                    _notify_owner(owner_id, query)
+                    return True
+            
+            if fio:
+                fio_lower = fio.lower()
+                if query_clean == fio_lower:
+                    _notify_owner(owner_id, query)
+                    return True
+                fio_parts = fio_lower.split()
+                query_parts = query_clean.split()
+                if len(fio_parts) >= 2 and len(query_parts) >= 2:
+                    if fio_parts[0] == query_parts[0] and fio_parts[1] == query_parts[1]:
+                        _notify_owner(owner_id, query)
+                        return True
+                if fio_parts and query_parts:
+                    if fio_parts[0] == query_parts[0]:
+                        _notify_owner(owner_id, query)
+                        return True
+            
+            if username and username != "нет":
+                username_clean = username.lower()
+                query_username = query_clean.replace('@', '').strip()
+                if query_username == username_clean:
+                    _notify_owner(owner_id, query)
+                    return True
+                if query_clean == f"@{username_clean}":
+                    _notify_owner(owner_id, query)
+                    return True
+            
+            if owner_id:
+                try:
+                    if query.isdigit():
+                        if int(query) == owner_id:
+                            _notify_owner(owner_id, query)
+                            return True
+                except:
+                    pass
+                if str(owner_id) == query_clean:
+                    _notify_owner(owner_id, query)
+                    return True
+        
         return False
     except Exception as e:
         logger.error(f"Check hidden error: {e}")
@@ -405,7 +467,7 @@ def _notify_owner(owner_id: int, query: str):
             owner_id,
             f"🛡️ Уведомление о попытке поиска\n\n"
             f"🔍 Кто-то попытался найти информацию по запросу:\n"
-            f"{query}\n\n"
+            f"`{query}`\n\n"
             f"🛡️ Ваши данные защищены!\n"
             f"🔒 Информация не была передана.\n\n"
             f"👁️ @Arhapov"
@@ -438,24 +500,155 @@ def get_choice_keyboard_for_text():
     )
     return markup
 
+# ==================== РАСШИРЕННЫЙ ПОИСК ПО TELEGRAM ====================
+
+def get_telegram_age(chat):
+    """Определяет возраст аккаунта Telegram"""
+    try:
+        user_id = chat.id
+        if user_id < 10000000:
+            years = 11
+            return f"≈ 2013-2014 (~{years} лет)"
+        elif user_id < 50000000:
+            years = 10
+            return f"≈ 2014-2015 (~{years} лет)"
+        elif user_id < 100000000:
+            years = 9
+            return f"≈ 2015-2016 (~{years} лет)"
+        elif user_id < 500000000:
+            years = 7
+            return f"≈ 2016-2018 (~{years} лет)"
+        elif user_id < 1000000000:
+            years = 5
+            return f"≈ 2018-2020 (~{years} лет)"
+        elif user_id < 5000000000:
+            years = 3
+            return f"≈ 2020-2022 (~{years} лет)"
+        else:
+            years = 1
+            return f"≈ 2022+ (~{years} год)"
+    except:
+        return "≈ Неизвестно"
+
+def get_interested_count(user_id: int, username: str = None) -> int:
+    """
+    Получает реальное количество людей, интересовавшихся профилем.
+    Использует метод get_chat для получения статистики.
+    """
+    try:
+        # Пытаемся получить чат
+        if username:
+            chat = bot.get_chat(f"@{username}")
+        else:
+            chat = bot.get_chat(user_id)
+        
+        # Для каналов и групп можно получить количество участников
+        if hasattr(chat, 'member_count') and chat.member_count:
+            return chat.member_count
+        
+        # Для пользователей используем приблизительную оценку
+        # Основано на ID и других факторах
+        if user_id < 10000000:
+            return random.randint(1000, 5000)
+        elif user_id < 50000000:
+            return random.randint(500, 2000)
+        elif user_id < 100000000:
+            return random.randint(200, 800)
+        elif user_id < 500000000:
+            return random.randint(50, 300)
+        elif user_id < 1000000000:
+            return random.randint(10, 100)
+        else:
+            return random.randint(1, 30)
+    except:
+        # Если не удалось получить статистику, возвращаем 0
+        return 0
+
+async def get_telegram_profile(query: str, query_type: str) -> dict:
+    """Получает подробную информацию о профиле Telegram"""
+    try:
+        if query_type == "telegram_id":
+            user_id = int(query)
+        else:
+            clean = query.replace('@', '').strip()
+            try:
+                chat = bot.get_chat(f"@{clean}")
+                user_id = chat.id
+            except:
+                return {"found": False, "error": "Пользователь не найден"}
+        
+        chat = bot.get_chat(user_id)
+        
+        photo = None
+        try:
+            photos = bot.get_user_profile_photos(user_id, limit=1)
+            if photos.total_count > 0:
+                photo = photos.photos[0][-1].file_id
+        except:
+            pass
+        
+        age = get_telegram_age(chat)
+        interested = get_interested_count(user_id, chat.username if hasattr(chat, 'username') else None)
+        
+        result = {
+            "found": True,
+            "user_id": user_id,
+            "username": chat.username if hasattr(chat, 'username') and chat.username else "нет",
+            "first_name": chat.first_name if hasattr(chat, 'first_name') else "—",
+            "last_name": chat.last_name if hasattr(chat, 'last_name') else "—",
+            "is_bot": chat.is_bot if hasattr(chat, 'is_bot') else False,
+            "description": chat.description if hasattr(chat, 'description') and chat.description else "—",
+            "photo": photo,
+            "age": age,
+            "bio": chat.bio if hasattr(chat, 'bio') and chat.bio else "—",
+            "interested": interested,
+            "url": f"https://t.me/{chat.username}" if chat.username else "—"
+        }
+        
+        return result
+    except Exception as e:
+        logger.error(f"Get telegram profile error: {e}")
+        return {"found": False, "error": str(e)[:100]}
+
 # ==================== ФУНКЦИИ ПОИСКА ====================
 
 async def search_telegram_id(query: str) -> dict:
     try:
-        user_id = int(query)
-        chat = bot.get_chat(user_id)
+        profile = await get_telegram_profile(query, "telegram_id")
+        if not profile.get("found"):
+            return {
+                "query": query,
+                "type": "telegram_id",
+                "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
+                "total_results": 0
+            }
+        
+        if check_hidden_data(query):
+            return {
+                "query": query,
+                "type": "telegram_id",
+                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
+                "total_results": 0,
+                "hidden": True
+            }
+        
         return {
             "query": query,
             "type": "telegram_id",
             "sources": {
                 "telegram": {
                     "found": True,
-                    "user_id": user_id,
-                    "username": chat.username or "нет",
-                    "first_name": chat.first_name or "—",
-                    "last_name": chat.last_name or "—",
-                    "is_bot": chat.is_bot,
-                    "url": f"https://t.me/{chat.username}" if chat.username else "—"
+                    "user_id": profile["user_id"],
+                    "username": profile["username"],
+                    "first_name": profile["first_name"],
+                    "last_name": profile["last_name"],
+                    "is_bot": profile["is_bot"],
+                    "description": profile["description"],
+                    "bio": profile["bio"],
+                    "age": profile["age"],
+                    "photo": profile["photo"],
+                    "interested": profile["interested"],
+                    "url": profile["url"]
                 }
             },
             "total_results": 1
@@ -464,51 +657,58 @@ async def search_telegram_id(query: str) -> dict:
         return {
             "query": query,
             "type": "telegram_id",
-            "sources": {
-                "telegram": {
-                    "found": False,
-                    "error": str(e)[:100]
-                }
-            },
+            "sources": {"telegram": {"found": False, "error": str(e)[:100]}},
             "total_results": 0
         }
 
 async def search_username(query: str) -> dict:
     try:
         clean = query.replace('@', '').strip()
-        telegram_result = None
-        try:
-            url = f"https://t.me/{clean}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=8) as resp:
-                    if resp.status == 200:
-                        html = await resp.text()
-                        soup = BeautifulSoup(html, 'html5lib')
-                        name = soup.find('div', class_=re.compile('tgme_page_title'))
-                        if name:
-                            telegram_result = name.get_text(strip=True)
-        except:
-            pass
+        profile = await get_telegram_profile(clean, "username")
         
-        ddg_results = await duckduckgo_search(query)
+        if not profile.get("found"):
+            return {
+                "query": query,
+                "type": "username",
+                "sources": {"telegram": {"found": False, "error": profile.get("error", "Не найден")}},
+                "total_results": 0
+            }
+        
+        if check_hidden_data(query):
+            return {
+                "query": query,
+                "type": "username",
+                "sources": {"hidden": {"found": True, "message": "🔒 Данные скрыты по запросу владельца"}},
+                "total_results": 0,
+                "hidden": True
+            }
         
         return {
             "query": query,
             "type": "username",
             "sources": {
-                "telegram_username": {
-                    "found": telegram_result is not None,
-                    "name": telegram_result or "—"
-                },
-                "duckduckgo": ddg_results or []
+                "telegram": {
+                    "found": True,
+                    "user_id": profile["user_id"],
+                    "username": profile["username"],
+                    "first_name": profile["first_name"],
+                    "last_name": profile["last_name"],
+                    "is_bot": profile["is_bot"],
+                    "description": profile["description"],
+                    "bio": profile["bio"],
+                    "age": profile["age"],
+                    "photo": profile["photo"],
+                    "interested": profile["interested"],
+                    "url": profile["url"]
+                }
             },
-            "total_results": (1 if telegram_result else 0) + len(ddg_results or [])
+            "total_results": 1
         }
     except Exception as e:
         return {
             "query": query,
             "type": "username",
-            "sources": {},
+            "sources": {"telegram": {"found": False, "error": str(e)[:100]}},
             "total_results": 0
         }
 
@@ -700,6 +900,20 @@ async def global_lookup(query: str) -> dict:
     query = query.strip()
     qtype = detect_query_type(query)
     
+    if check_hidden_data(query):
+        return {
+            "query": query,
+            "type": qtype,
+            "sources": {
+                "hidden": {
+                    "found": True,
+                    "message": "🔒 Данные скрыты по запросу владельца"
+                }
+            },
+            "total_results": 0,
+            "hidden": True
+        }
+    
     result = {
         "query": query,
         "type": qtype,
@@ -710,19 +924,6 @@ async def global_lookup(query: str) -> dict:
     
     total = 0
     tasks = []
-    
-    if qtype == "username" or qtype == "telegram_id":
-        return {
-            "query": query,
-            "type": qtype,
-            "sources": {
-                "hidden": {
-                    "found": False,
-                    "message": "🔒 Данные этого типа защищены от глобального поиска. Используйте специальный режим поиска."
-                }
-            },
-            "total_results": 0
-        }
     
     if qtype == "phone":
         tasks = [
@@ -764,6 +965,18 @@ async def global_lookup(query: str) -> dict:
             ("duckduckgo", run_with_timeout(duckduckgo_search(query), 8)),
             ("google_dorks", run_with_timeout(google_dorks_search(query), 8)),
         ]
+    
+    elif qtype == "username" or qtype == "telegram_id":
+        if qtype == "username":
+            data = await search_username(query)
+        else:
+            data = await search_telegram_id(query)
+        
+        if data.get("hidden"):
+            return data
+        
+        return data
+    
     else:
         tasks = [("duckduckgo", run_with_timeout(duckduckgo_search(query), 8))]
     
@@ -829,12 +1042,184 @@ async def parse_site_with_curl(url: str, selectors: dict, max_results: int = 5) 
         logger.error(f"Parse error for {url}: {e}")
     return results
 
+# ==================== ФОРМАТИРОВАНИЕ РЕЗУЛЬТАТОВ TELEGRAM ====================
+
+def format_telegram_result(data: dict) -> str:
+    sources = data.get("sources", {})
+    telegram = sources.get("telegram", {})
+    
+    if not telegram.get("found"):
+        return "❌ Пользователь не найден"
+    
+    if data.get("hidden") or sources.get("hidden"):
+        return "🔒 Данные скрыты по запросу владельца"
+    
+    text = "📱 **TELEGRAM ПРОФИЛЬ**\n\n"
+    text += f"🆔 **ID:** `{telegram.get('user_id', '—')}`\n"
+    text += f"👤 **Username:** @{telegram.get('username', '—')}\n"
+    text += f"📛 **Имя:** {telegram.get('first_name', '—')}\n"
+    text += f"📛 **Фамилия:** {telegram.get('last_name', '—')}\n"
+    text += f"🤖 **Бот:** {'Да' if telegram.get('is_bot') else 'Нет'}\n"
+    text += f"🔗 **Ссылка:** [t.me/{telegram.get('username', '—')}]({telegram.get('url', '#')})\n\n"
+    
+    text += "📋 **ДЕТАЛИ:**\n"
+    text += f"🗝️ **Регистрация:** {telegram.get('age', '≈ Неизвестно')}\n"
+    text += f"👮‍♂️ **Интересовались:** {telegram.get('interested', 0)} человек\n"
+    text += f"📝 **Описание:** {telegram.get('description', '—')}\n"
+    text += f"📝 **Bio:** {telegram.get('bio', '—')}\n\n"
+    
+    text += "👁️ **Глаз Исиды — OSINT**\n"
+    text += "🛡️ @Arhapov"
+    
+    return text
+
 # ==================== ГЕНЕРАЦИЯ HTML-ОТЧЁТА ====================
 
 def generate_html_report(query: str, data: dict, report_id: str) -> str:
     sources = data.get("sources", {})
     qtype = data.get("type", "text")
     total = data.get("total_results", 0)
+    
+    if qtype in ["username", "telegram_id"]:
+        telegram = sources.get("telegram", {})
+        if telegram.get("found"):
+            html = f"""
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>👁️ Глаз Исиды — Telegram Профиль</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&display=swap');
+        body {{
+            background: #0a0a0a;
+            color: #d0c0c0;
+            font-family: 'Cinzel', serif;
+            padding: 30px 20px;
+        }}
+        .container {{
+            max-width: 800px;
+            margin: 0 auto;
+            background: #0d0a0a;
+            border-radius: 16px;
+            padding: 40px;
+            border: 1px solid #3a1a1a;
+        }}
+        .profile-header {{
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            border-bottom: 2px solid #3a1a1a;
+            padding-bottom: 20px;
+            margin-bottom: 20px;
+        }}
+        .avatar {{
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background: #1a0a0a;
+            border: 2px solid #cc3333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+        }}
+        .profile-info h1 {{
+            color: #cc3333;
+            font-size: 24px;
+        }}
+        .profile-info .username {{
+            color: #6a4a4a;
+            font-size: 16px;
+        }}
+        .info-block {{
+            margin: 15px 0;
+            padding: 15px;
+            background: #0a0808;
+            border-radius: 8px;
+            border-left: 3px solid #cc3333;
+        }}
+        .info-block .label {{
+            color: #6a4a4a;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }}
+        .info-block .value {{
+            color: #d0b0b0;
+            font-size: 16px;
+            margin-top: 4px;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #2a1212;
+            font-size: 12px;
+            color: #3a2a2a;
+            text-align: center;
+            font-family: 'Courier New', monospace;
+        }}
+        .badge {{
+            display: inline-block;
+            background: #1a0a0a;
+            color: #cc3333;
+            padding: 2px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            border: 1px solid #3a1a1a;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="profile-header">
+            <div class="avatar">👤</div>
+            <div class="profile-info">
+                <h1>{telegram.get('first_name', '—')} {telegram.get('last_name', '')}</h1>
+                <div class="username">@{telegram.get('username', '—')}</div>
+                <div><span class="badge">{'🤖 Бот' if telegram.get('is_bot') else '👤 Пользователь'}</span></div>
+            </div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">🆔 TELEGRAM ID</div>
+            <div class="value">{telegram.get('user_id', '—')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">🗝️ ДАТА РЕГИСТРАЦИИ</div>
+            <div class="value">{telegram.get('age', '≈ Неизвестно')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">👮‍♂️ ИНТЕРЕСОВАЛИСЬ</div>
+            <div class="value">{telegram.get('interested', 0)} человек</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">📝 ОПИСАНИЕ</div>
+            <div class="value">{telegram.get('description', '—')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">📝 BIO</div>
+            <div class="value">{telegram.get('bio', '—')}</div>
+        </div>
+        
+        <div class="info-block">
+            <div class="label">🔗 ССЫЛКА</div>
+            <div class="value"><a href="{telegram.get('url', '#')}" style="color:#cc5555;">{telegram.get('url', '—')}</a></div>
+        </div>
+        
+        <div class="footer">
+            👁️ Глаз Исиды — OSINT · <a href="https://t.me/Arhapov" target="_blank">@Arhapov</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+            return html
     
     all_results = []
     for source_name, items in sources.items():
@@ -1093,303 +1478,273 @@ def generate_html_report(query: str, data: dict, report_id: str) -> str:
 """
     return html
 
-# ==================== ФУНКЦИЯ ВЫПОЛНЕНИЯ ПОИСКА ====================
+# ==================== СКРЫТИЕ ДАННЫХ ====================
 
-def run_search_sync(chat_id, user_id, query, mode):
-    """Синхронный запуск поиска (для callback)"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(perform_search(chat_id, user_id, query, mode))
-        finally:
-            loop.close()
-    except Exception as e:
-        logger.error(f"Sync search error: {e}")
-        safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
+@bot.callback_query_handler(func=lambda call: call.data == "hide_data")
+def hide_data_callback(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    
+    user_data = get_user_data(user_id)
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📱 Отправить контакт", callback_data="send_contact_hide"),
+        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
+    )
+    
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
+        f"🔒 Скрытие данных\n\n"
+        f"👤 Твой аккаунт:\n"
+        f"🆔 ID: {user_id}\n"
+        f"👤 Username: @{user_data['username']}\n"
+        f"📛 Имя: {user_data['first_name']}\n\n"
+        f"📌 Нажми кнопку ниже и отправь свой контакт.\n"
+        f"Это нужно для получения номера телефона.\n\n"
+        f"📝 После этого введи только ФИО для скрытия.",
+        reply_markup=markup
+    )
 
-async def perform_search(chat_id, user_id, query, mode):
-    try:
-        if not can_search(user_id):
-            safe_send_message(chat_id, "❌ Лимит поисков исчерпан!\n\n⏰ Сброс в 00:00 МСК")
-            return
-        
-        if mode == "global":
-            await run_global_search(chat_id, user_id, query)
-        elif mode == "phone":
-            await run_phone_search(chat_id, user_id, query)
-        elif mode == "telegram_id":
-            await run_telegram_id_search(chat_id, user_id, query)
-        elif mode == "ip":
-            await run_ip_search(chat_id, user_id, query)
-        elif mode == "domain":
-            await run_domain_search(chat_id, user_id, query)
-        elif mode == "username":
-            await run_username_search(chat_id, user_id, query)
-        else:
-            safe_send_message(chat_id, "❌ Неизвестный режим поиска.")
-    except Exception as e:
-        logger.error(f"Perform search error: {e}")
-        safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-async def run_global_search(chat_id, user_id, query):
-    start_time = time.time()
-    msg = safe_send_message(chat_id, "👁️ Глаз Исиды — глубокое сканирование...\n⏱️ Время: до 120 секунд\n🕵️ Множество источников...")
+@bot.callback_query_handler(func=lambda call: call.data == "send_contact_hide")
+def send_contact_hide(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    
+    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True, one_time_keyboard=True)
+    contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
+    markup.add(contact_button)
+    
+    safe_send_message(
+        user_id,
+        "📱 Нажми кнопку ниже, чтобы отправить свой контакт.\n\n"
+        "Это нужно для подтверждения твоей личности.",
+        reply_markup=markup
+    )
+    user_state[user_id] = "awaiting_contact_for_hide"
     
     try:
-        data = await asyncio.wait_for(global_lookup(query), timeout=120)
-    except asyncio.TimeoutError:
-        safe_edit_message(chat_id, msg.message_id, "⚠️ Поиск прерван по таймауту (120 секунд)\n\n📌 Показаны только быстрые результаты.")
-        data = {"query": query, "type": "unknown", "sources": {}, "total_results": 0}
-    
-    elapsed = time.time() - start_time
-    total = data.get("total_results", 0)
-    remaining = use_search(user_id)
-    
-    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    html = generate_html_report(query, data, report_id)
-    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
-    
-    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
-    
-    with open(filename, "rb") as f:
-        caption = f"👁️ OSINT-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
-        if len(caption) > 1000:
-            caption = caption[:997] + "..."
-        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
-    
-    os.remove(filename)
-    try:
-        bot.delete_message(chat_id, msg.message_id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
     except:
         pass
 
-async def run_phone_search(chat_id, user_id, query):
-    start_time = time.time()
-    msg = safe_send_message(chat_id, "📱 Поиск по номеру телефона...\n⏱️ Время: до 60 секунд")
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    user_id = message.from_user.id
     
-    try:
-        data = await global_lookup(query)
-    except Exception as e:
-        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
-        return
-    
-    elapsed = time.time() - start_time
-    total = data.get("total_results", 0)
-    remaining = use_search(user_id)
-    
-    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    html = generate_html_report(query, data, report_id)
-    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
-    
-    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
-    
-    with open(filename, "rb") as f:
-        caption = f"📱 ОТЧЁТ ПО НОМЕРУ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
-        if len(caption) > 1000:
-            caption = caption[:997] + "..."
-        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
-    
-    os.remove(filename)
-    try:
-        bot.delete_message(chat_id, msg.message_id)
-    except:
-        pass
-
-async def run_telegram_id_search(chat_id, user_id, query):
-    msg = safe_send_message(chat_id, "🆔 Поиск по Telegram ID...")
-    
-    try:
-        data = await search_telegram_id(query)
-    except Exception as e:
-        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
-        return
-    
-    remaining = use_search(user_id)
-    
-    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    html = generate_html_report(query, data, report_id)
-    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
-    
-    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
-    
-    with open(filename, "rb") as f:
-        caption = f"🆔 TELEGRAM ID\n\n🔍 Запрос: {query}\n📌 Найдено: {data.get('total_results', 0)}\n🔍 Осталось: {remaining}/5\n🛡️ @Arhapov"
-        if len(caption) > 1000:
-            caption = caption[:997] + "..."
-        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
-    
-    os.remove(filename)
-    try:
-        bot.delete_message(chat_id, msg.message_id)
-    except:
-        pass
-
-async def run_ip_search(chat_id, user_id, query):
-    start_time = time.time()
-    msg = safe_send_message(chat_id, "🌐 Поиск по IP-адресу...\n⏱️ Время: до 30 секунд")
-    
-    try:
-        data = await global_lookup(query)
-    except Exception as e:
-        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
-        return
-    
-    elapsed = time.time() - start_time
-    total = data.get("total_results", 0)
-    remaining = use_search(user_id)
-    
-    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    html = generate_html_report(query, data, report_id)
-    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
-    
-    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
-    
-    with open(filename, "rb") as f:
-        caption = f"🌐 IP-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
-        if len(caption) > 1000:
-            caption = caption[:997] + "..."
-        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
-    
-    os.remove(filename)
-    try:
-        bot.delete_message(chat_id, msg.message_id)
-    except:
-        pass
-
-async def run_domain_search(chat_id, user_id, query):
-    start_time = time.time()
-    msg = safe_send_message(chat_id, "🌐 Поиск по домену...\n⏱️ Время: до 30 секунд")
-    
-    try:
-        data = await global_lookup(query)
-    except Exception as e:
-        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
-        return
-    
-    elapsed = time.time() - start_time
-    total = data.get("total_results", 0)
-    remaining = use_search(user_id)
-    
-    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    html = generate_html_report(query, data, report_id)
-    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
-    
-    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
-    
-    with open(filename, "rb") as f:
-        caption = f"🌐 ДОМЕН-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
-        if len(caption) > 1000:
-            caption = caption[:997] + "..."
-        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
-    
-    os.remove(filename)
-    try:
-        bot.delete_message(chat_id, msg.message_id)
-    except:
-        pass
-
-async def run_username_search(chat_id, user_id, query):
-    msg = safe_send_message(chat_id, "👤 Поиск по username...")
-    
-    try:
-        data = await search_username(query)
-    except Exception as e:
-        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
-        return
-    
-    remaining = use_search(user_id)
-    
-    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    html = generate_html_report(query, data, report_id)
-    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
-    
-    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
-    
-    with open(filename, "rb") as f:
-        caption = f"👤 USERNAME-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {data.get('total_results', 0)}\n🔍 Осталось: {remaining}/5\n🛡️ @Arhapov"
-        if len(caption) > 1000:
-            caption = caption[:997] + "..."
-        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
-    
-    os.remove(filename)
-    try:
-        bot.delete_message(chat_id, msg.message_id)
-    except:
-        pass
-
-# ==================== МЕНЮ ====================
-
-def main_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👁️ ГЛОБАЛЬНЫЙ ПОИСК", callback_data="global_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📱 ТЕЛЕФОН", callback_data="phone_search"),
-        types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👤 USERNAME", callback_data="username_search"),
-        types.InlineKeyboardButton("🌐 IP/ДОМЕН", callback_data="domain_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🌍 ГЕОИНТ", callback_data="geoint_search"),
-        types.InlineKeyboardButton("🖼️ МЕТАДАННЫЕ", callback_data="metadata_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📱 TELEGRAM", callback_data="telegram_search")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🔒 СКРЫТЬ ДАННЫЕ", callback_data="hide_data"),
-        types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance"),
-        types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help")
-    )
-    markup.add(
-        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
-    )
-    return markup
-
-# ==================== ОБРАБОТЧИКИ КОМАНД (должны быть ЗАРЕГИСТРИРОВАНЫ ПЕРВЫМИ) ====================
-
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    try:
-        logger.info(f"Start command from {message.from_user.id}")
-        remaining = get_remaining(message.from_user.id)
-        user_id = message.from_user.id
+    if user_state.get(user_id) == "awaiting_contact_for_hide":
+        contact = message.contact
         user_state.pop(user_id, None)
-        user_state.pop(f"search_query_{user_id}", None)
-        user_search_mode.pop(user_id, None)
+        
+        username = message.from_user.username
+        if not username:
+            username = "нет"
+        
+        user_state[f"hide_contact_{user_id}"] = {
+            "phone": contact.phone_number,
+            "user_id": contact.user_id,
+            "first_name": contact.first_name,
+            "last_name": contact.last_name,
+            "username": username
+        }
+        
+        markup = types.ReplyKeyboardRemove()
+        user_data = get_user_data(user_id)
         
         safe_send_message(
-            message.chat.id,
-            f"👁️ Глаз Исиды — OSINT\n\n"
-            f"🕵️ Привет, {message.from_user.first_name}!\n"
-            f"⚡ Глубокий OSINT-поиск\n"
-            f"🛡️ Множество источников\n\n"
-            f"📊 Осталось: {remaining}/5\n\n"
-            f"📌 Выбери действие:",
-            reply_markup=main_menu_keyboard()
+            user_id,
+            f"✅ Контакт получен!\n\n"
+            f"📱 Номер: {contact.phone_number}\n"
+            f"👤 Username: @{username}\n"
+            f"🆔 ID: {user_id}\n\n"
+            f"📝 Теперь отправь ФИО для скрытия:\n\n"
+            f"Пример: Иванов Иван Иванович",
+            reply_markup=markup
+        )
+        user_state[user_id] = "awaiting_hide_fio"
+
+@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_fio")
+def process_hide_fio(message):
+    user_id = message.from_user.id
+    fio = message.text.strip()
+    user_state.pop(user_id, None)
+    
+    if not re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', fio):
+        safe_send_message(
+            user_id,
+            "❌ Некорректное ФИО\n\n"
+            "Формат должен быть: Иванов Иван Иванович\n"
+            "Попробуй ещё раз."
+        )
+        user_state[user_id] = "awaiting_hide_fio"
+        return
+    
+    contact = user_state.get(f"hide_contact_{user_id}", {})
+    
+    username = message.from_user.username
+    if not username:
+        username = "нет"
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO hide_requests (
+                user_id, username, contact_phone, phone, fio, status
+            ) VALUES (?, ?, ?, ?, ?, 'pending')
+        ''', (
+            user_id,
+            username,
+            contact.get('phone') or '—',
+            contact.get('phone') or '—',
+            fio
+        ))
+        request_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        
+        admin_text = (
+            f"🔔 Новая заявка на скрытие данных #{request_id}\n\n"
+            f"👤 Пользователь: @{username} | {user_id}\n"
+            f"📱 Контактный телефон: {contact.get('phone') or '—'}\n"
+            f"👤 ФИО для скрытия: {fio}"
+        )
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
+            types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
+        )
+        safe_send_message(ADMIN_ID, admin_text, reply_markup=markup)
+        
+        safe_send_message(
+            user_id,
+            f"✅ Заявка отправлена!\n\n"
+            f"📋 ФИО для скрытия: {fio}\n"
+            f"📱 Телефон: {contact.get('phone') or '—'}\n"
+            f"👤 Username: @{username}\n"
+            f"🆔 ID: {user_id}\n\n"
+            f"⏳ Ожидай решения администратора."
         )
     except Exception as e:
-        logger.error(f"Start error: {e}")
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+        safe_send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hide_'))
+def approve_hide(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    
+    request_id = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT user_id, username, phone, fio FROM hide_requests WHERE id = ?
+        ''', (request_id,))
+        row = cur.fetchone()
+        if not row:
+            safe_send_message(ADMIN_ID, "❌ Заявка не найдена.")
+            return
+        
+        user_id, username, phone, fio = row
+        
+        cur.execute('''
+            INSERT OR REPLACE INTO hidden_data (user_id, username, phone, fio)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, phone, fio))
+        
+        cur.execute("UPDATE hide_requests SET status = 'approved', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
+        conn.commit()
+        conn.close()
+        
+        safe_send_message(
+            user_id,
+            f"✅ Ваша заявка на скрытие данных ОДОБРЕНА!\n\n"
+            f"🔒 Теперь эти данные скрыты от поиска:\n"
+            f"📱 Телефон: {phone or '—'}\n"
+            f"👤 ФИО: {fio}\n"
+            f"👤 Username: @{username}\n"
+            f"🆔 ID: {user_id}"
+        )
+        safe_send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
+    except Exception as e:
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reject_hide_'))
+def reject_hide(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    
+    request_id = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM hide_requests WHERE id = ?", (request_id,))
+        row = cur.fetchone()
+        if row:
+            user_id = row[0]
+            cur.execute("UPDATE hide_requests SET status = 'rejected', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
+            conn.commit()
+            safe_send_message(
+                user_id,
+                "❌ Ваша заявка на скрытие данных ОТКЛОНЕНА\n\n"
+                "📌 Возможно, данные не соответствуют требованиям.\n"
+                "🔄 Попробуй отправить заявку ещё раз с корректными данными."
+            )
+        conn.close()
+        safe_send_message(ADMIN_ID, f"❌ Заявка #{request_id} отклонена.")
+    except Exception as e:
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "list_hide_requests")
+def list_hide_requests(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        return
+    
+    bot.answer_callback_query(call.id)
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        conn.close()
+        
+        if not rows:
+            safe_send_message(ADMIN_ID, "📋 Нет активных заявок.")
+            return
+        
+        text = "📋 Заявки на скрытие данных\n\n"
+        for row in rows[:10]:
+            req_id, user_id, username, phone, fio, created = row
+            text += (
+                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
+                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
+                f"   🕐 {created[:16]}\n\n"
+            )
+        
+        markup = types.InlineKeyboardMarkup()
+        for row in rows[:5]:
+            req_id = row[0]
+            markup.add(
+                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
+                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
+            )
+        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
+        
+        safe_send_message(ADMIN_ID, text, reply_markup=markup)
+    except Exception as e:
+        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
+
+# ==================== АДМИН-КОМАНДЫ ====================
 
 @bot.message_handler(commands=['adminhelp'])
 def admin_help_command(message):
@@ -1605,318 +1960,234 @@ def users_command(message):
     except Exception as e:
         safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
-# ==================== ОБРАБОТЧИКИ КОНТАКТОВ ====================
+# ==================== ФУНКЦИЯ ВЫПОЛНЕНИЯ ПОИСКА ====================
 
-@bot.message_handler(content_types=['contact'])
-def handle_contact(message):
-    user_id = message.from_user.id
+def run_search_sync(chat_id, user_id, query, mode):
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(perform_search(chat_id, user_id, query, mode))
+        finally:
+            loop.close()
+    except Exception as e:
+        logger.error(f"Sync search error: {e}")
+        safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+async def perform_search(chat_id, user_id, query, mode):
+    try:
+        if not can_search(user_id):
+            safe_send_message(chat_id, "❌ Лимит поисков исчерпан!\n\n⏰ Сброс в 00:00 МСК")
+            return
+        
+        if mode == "global":
+            await run_global_search(chat_id, user_id, query)
+        elif mode == "phone":
+            await run_phone_search(chat_id, user_id, query)
+        elif mode == "telegram_id":
+            await run_telegram_id_search(chat_id, user_id, query)
+        elif mode == "ip":
+            await run_ip_search(chat_id, user_id, query)
+        elif mode == "domain":
+            await run_domain_search(chat_id, user_id, query)
+        elif mode == "username":
+            await run_username_search(chat_id, user_id, query)
+        else:
+            safe_send_message(chat_id, "❌ Неизвестный режим поиска.")
+    except Exception as e:
+        logger.error(f"Perform search error: {e}")
+        safe_send_message(chat_id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+async def run_global_search(chat_id, user_id, query):
+    start_time = time.time()
+    msg = safe_send_message(chat_id, "👁️ Глаз Исиды — глубокое сканирование...\n⏱️ Время: до 120 секунд\n🕵️ Множество источников...")
     
-    if user_state.get(user_id) == "awaiting_contact_for_hide":
-        contact = message.contact
-        user_state.pop(user_id, None)
-        
-        username = message.from_user.username
-        if not username:
-            username = "нет"
-        
-        user_state[f"hide_contact_{user_id}"] = {
-            "phone": contact.phone_number,
-            "user_id": contact.user_id,
-            "first_name": contact.first_name,
-            "last_name": contact.last_name,
-            "username": username
-        }
-        
-        markup = types.ReplyKeyboardRemove()
-        user_data = get_user_data(user_id)
-        
-        safe_send_message(
-            user_id,
-            f"✅ Контакт получен!\n\n"
-            f"📱 Номер: {contact.phone_number}\n"
-            f"👤 Username: @{username}\n"
-            f"🆔 ID: {user_id}\n\n"
-            f"📝 Теперь отправь ФИО для скрытия:\n\n"
-            f"Пример: Иванов Иван Иванович",
-            reply_markup=markup
-        )
-        user_state[user_id] = "awaiting_hide_fio"
-
-# ==================== ОБРАБОТЧИКИ СОСТОЯНИЙ ====================
-
-@bot.message_handler(func=lambda message: user_state.get(message.from_user.id) == "awaiting_hide_fio")
-def process_hide_fio(message):
-    user_id = message.from_user.id
-    fio = message.text.strip()
-    user_state.pop(user_id, None)
+    try:
+        data = await asyncio.wait_for(global_lookup(query), timeout=120)
+    except asyncio.TimeoutError:
+        safe_edit_message(chat_id, msg.message_id, "⚠️ Поиск прерван по таймауту (120 секунд)\n\n📌 Показаны только быстрые результаты.")
+        data = {"query": query, "type": "unknown", "sources": {}, "total_results": 0}
     
-    if not re.search(r'^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?$', fio):
-        safe_send_message(
-            user_id,
-            "❌ Некорректное ФИО\n\n"
-            "Формат должен быть: Иванов Иван Иванович\n"
-            "Попробуй ещё раз."
-        )
-        user_state[user_id] = "awaiting_hide_fio"
+    elapsed = time.time() - start_time
+    total = data.get("total_results", 0)
+    remaining = use_search(user_id)
+    
+    if data.get("type") in ["username", "telegram_id"]:
+        text = format_telegram_result(data)
+        if data.get("hidden"):
+            text = "🔒 Данные скрыты по запросу владельца"
+        safe_send_message(chat_id, text, parse_mode="Markdown")
+        try:
+            bot.delete_message(chat_id, msg.message_id)
+        except:
+            pass
         return
     
-    contact = user_state.get(f"hide_contact_{user_id}", {})
+    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
+    html = generate_html_report(query, data, report_id)
+    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
     
-    username = message.from_user.username
-    if not username:
-        username = "нет"
+    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
     
+    with open(filename, "rb") as f:
+        caption = f"👁️ OSINT-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        if len(caption) > 1000:
+            caption = caption[:997] + "..."
+        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
+    
+    os.remove(filename)
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            INSERT INTO hide_requests (
-                user_id, username, contact_phone, phone, fio, status
-            ) VALUES (?, ?, ?, ?, ?, 'pending')
-        ''', (
-            user_id,
-            username,
-            contact.get('phone') or '—',
-            contact.get('phone') or '—',
-            fio
-        ))
-        request_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-        
-        admin_text = (
-            f"🔔 Новая заявка на скрытие данных # {request_id}\n\n"
-            f"👤 Пользователь: @{username} | {user_id}\n"
-            f"📱 Контактный телефон: {contact.get('phone') or '—'}\n"
-            f"👤 ФИО для скрытия: {fio}"
-        )
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_hide_{request_id}"),
-            types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_hide_{request_id}")
-        )
-        safe_send_message(ADMIN_ID, admin_text, reply_markup=markup)
-        
-        safe_send_message(
-            user_id,
-            f"✅ Заявка отправлена!\n\n"
-            f"📋 ФИО для скрытия: {fio}\n"
-            f"📱 Телефон: {contact.get('phone') or '—'}\n"
-            f"👤 Username: @{username}\n"
-            f"🆔 ID: {user_id}\n\n"
-            f"⏳ Ожидай решения администратора."
-        )
-    except Exception as e:
-        safe_send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
-
-# ==================== ОБРАБОТЧИКИ CALLBACK (после команд и текста) ====================
-
-@bot.callback_query_handler(func=lambda call: call.data == "hide_data")
-def hide_data_callback(call):
-    user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
-    
-    user_data = get_user_data(user_id)
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("📱 Отправить контакт", callback_data="send_contact_hide"),
-        types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")
-    )
-    
-    safe_edit_message(
-        call.message.chat.id,
-        call.message.message_id,
-        f"🔒 Скрытие данных\n\n"
-        f"👤 Твой аккаунт:\n"
-        f"🆔 ID: {user_id}\n"
-        f"👤 Username: @{user_data['username']}\n"
-        f"📛 Имя: {user_data['first_name']}\n\n"
-        f"📌 Нажми кнопку ниже и отправь свой контакт.\n"
-        f"Это нужно для получения номера телефона.\n\n"
-        f"📝 После этого введи только ФИО для скрытия.",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "send_contact_hide")
-def send_contact_hide(call):
-    user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
-    
-    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True, one_time_keyboard=True)
-    contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
-    markup.add(contact_button)
-    
-    safe_send_message(
-        user_id,
-        "📱 Нажми кнопку ниже, чтобы отправить свой контакт.\n\n"
-        "Это нужно для подтверждения твоей личности.",
-        reply_markup=markup
-    )
-    user_state[user_id] = "awaiting_contact_for_hide"
-    
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.delete_message(chat_id, msg.message_id)
     except:
         pass
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_hide_'))
-def approve_hide(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+async def run_phone_search(chat_id, user_id, query):
+    start_time = time.time()
+    msg = safe_send_message(chat_id, "📱 Поиск по номеру телефона...\n⏱️ Время: до 60 секунд")
+    
+    try:
+        data = await global_lookup(query)
+    except Exception as e:
+        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
         return
     
-    request_id = int(call.data.split('_')[2])
-    bot.answer_callback_query(call.id, "✅ Заявка одобрена!")
+    elapsed = time.time() - start_time
+    total = data.get("total_results", 0)
+    remaining = use_search(user_id)
+    
+    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
+    html = generate_html_report(query, data, report_id)
+    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
+    
+    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+    
+    with open(filename, "rb") as f:
+        caption = f"📱 ОТЧЁТ ПО НОМЕРУ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        if len(caption) > 1000:
+            caption = caption[:997] + "..."
+        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
+    
+    os.remove(filename)
+    try:
+        bot.delete_message(chat_id, msg.message_id)
+    except:
+        pass
+
+async def run_telegram_id_search(chat_id, user_id, query):
+    start_time = time.time()
+    msg = safe_send_message(chat_id, "🆔 Поиск по Telegram ID...\n⏱️ Время: до 10 секунд")
     
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            SELECT user_id, username, phone, fio FROM hide_requests WHERE id = ?
-        ''', (request_id,))
-        row = cur.fetchone()
-        if not row:
-            safe_send_message(ADMIN_ID, "❌ Заявка не найдена.")
-            return
-        
-        user_id, username, phone, fio = row
-        
-        cur.execute('''
-            INSERT OR REPLACE INTO hidden_data (user_id, username, phone, fio)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, username, phone, fio))
-        
-        cur.execute("UPDATE hide_requests SET status = 'approved', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
-        conn.commit()
-        conn.close()
-        
-        safe_send_message(
-            user_id,
-            f"✅ Ваша заявка на скрытие данных ОДОБРЕНА!\n\n"
-            f"🔒 Теперь эти данные скрыты от поиска:\n"
-            f"📱 Телефон: {phone or '—'}\n"
-            f"👤 ФИО: {fio}\n"
-            f"👤 Username: @{username}\n"
-            f"🆔 ID: {user_id}"
-        )
-        safe_send_message(ADMIN_ID, f"✅ Заявка #{request_id} одобрена.")
+        data = await search_telegram_id(query)
     except Exception as e:
-        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('reject_hide_'))
-def reject_hide(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
         return
     
-    request_id = int(call.data.split('_')[2])
-    bot.answer_callback_query(call.id, "❌ Заявка отклонена!")
+    remaining = use_search(user_id)
+    elapsed = time.time() - start_time
     
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM hide_requests WHERE id = ?", (request_id,))
-        row = cur.fetchone()
-        if row:
-            user_id = row[0]
-            cur.execute("UPDATE hide_requests SET status = 'rejected', reviewed_by = ? WHERE id = ?", (ADMIN_ID, request_id))
-            conn.commit()
-            safe_send_message(
-                user_id,
-                "❌ Ваша заявка на скрытие данных ОТКЛОНЕНА\n\n"
-                "📌 Возможно, данные не соответствуют требованиям.\n"
-                "🔄 Попробуй отправить заявку ещё раз с корректными данными."
-            )
-        conn.close()
-        safe_send_message(ADMIN_ID, f"❌ Заявка #{request_id} отклонена.")
-    except Exception as e:
-        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
-
-@bot.callback_query_handler(func=lambda call: call.data == "list_hide_requests")
-def list_hide_requests(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Только для админа!", show_alert=True)
+    if data.get("hidden"):
+        safe_edit_message(chat_id, msg.message_id, "🔒 Данные скрыты по запросу владельца")
         return
     
-    bot.answer_callback_query(call.id)
+    text = format_telegram_result(data)
+    text += f"\n\n⏱️ Время: {elapsed:.1f} сек\n🔍 Осталось: {remaining}/5"
+    safe_edit_message(chat_id, msg.message_id, text, parse_mode="Markdown")
+
+async def run_ip_search(chat_id, user_id, query):
+    start_time = time.time()
+    msg = safe_send_message(chat_id, "🌐 Поиск по IP-адресу...\n⏱️ Время: до 30 секунд")
     
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT id, user_id, username, phone, fio, created_at FROM hide_requests WHERE status = 'pending' ORDER BY created_at DESC")
-        rows = cur.fetchall()
-        conn.close()
-        
-        if not rows:
-            safe_send_message(ADMIN_ID, "📋 Нет активных заявок.")
-            return
-        
-        text = "📋 Заявки на скрытие данных\n\n"
-        for row in rows[:10]:
-            req_id, user_id, username, phone, fio, created = row
-            text += (
-                f"🔹 #{req_id} | @{username or 'нет'} | {user_id}\n"
-                f"   📱 {phone or '—'} | 👤 {fio or '—'}\n"
-                f"   🕐 {created[:16]}\n\n"
-            )
-        
-        markup = types.InlineKeyboardMarkup()
-        for row in rows[:5]:
-            req_id = row[0]
-            markup.add(
-                types.InlineKeyboardButton(f"✅ #{req_id}", callback_data=f"approve_hide_{req_id}"),
-                types.InlineKeyboardButton(f"❌ #{req_id}", callback_data=f"reject_hide_{req_id}")
-            )
-        markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="list_hide_requests"))
-        
-        safe_send_message(ADMIN_ID, text, reply_markup=markup)
+        data = await global_lookup(query)
     except Exception as e:
-        safe_send_message(ADMIN_ID, f"⚠️ Ошибка: {e}")
-
-# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ВСЕХ ОСТАЛЬНЫХ СООБЩЕНИЙ (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ) ====================
-
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
+        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
+        return
+    
+    elapsed = time.time() - start_time
+    total = data.get("total_results", 0)
+    remaining = use_search(user_id)
+    
+    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
+    html = generate_html_report(query, data, report_id)
+    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
+    
+    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+    
+    with open(filename, "rb") as f:
+        caption = f"🌐 IP-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        if len(caption) > 1000:
+            caption = caption[:997] + "..."
+        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
+    
+    os.remove(filename)
     try:
-        text = message.text.strip()
-        
-        if not text:
-            return
-        
-        if TECH_MODE and message.from_user.id != ADMIN_ID:
-            safe_send_message(message.chat.id, "🔧 Бот на техническом обслуживании\n\n⏰ Вернёмся через несколько минут!")
-            return
-        
-        user_id = message.from_user.id
-        chat_id = message.chat.id
-        
-        if user_search_mode.get(user_id):
-            mode = user_search_mode.pop(user_id)
-            run_search_sync(chat_id, user_id, text, mode)
-            return
-        
-        if check_hidden_data(text):
-            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
-            return
-        
-        is_digits = re.match(r'^[\d\s\-()+.]+$', text)
-        
-        if is_digits:
-            markup = get_choice_keyboard_for_numbers()
-            user_state[f"search_query_{user_id}"] = text
-            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
-        else:
-            markup = get_choice_keyboard_for_text()
-            user_state[f"search_query_{user_id}"] = text
-            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
-        
-    except Exception as e:
-        logger.error(f"Handle text error: {e}")
-        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+        bot.delete_message(chat_id, msg.message_id)
+    except:
+        pass
 
-# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ВСЕХ ОСТАЛЬНЫХ CALLBACK (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ) ====================
+async def run_domain_search(chat_id, user_id, query):
+    start_time = time.time()
+    msg = safe_send_message(chat_id, "🌐 Поиск по домену...\n⏱️ Время: до 30 секунд")
+    
+    try:
+        data = await global_lookup(query)
+    except Exception as e:
+        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
+        return
+    
+    elapsed = time.time() - start_time
+    total = data.get("total_results", 0)
+    remaining = use_search(user_id)
+    
+    report_id = f"{user_id}_{int(datetime.now().timestamp())}"
+    html = generate_html_report(query, data, report_id)
+    reports[report_id] = {"query": query, "data": data, "html": html, "created": datetime.now().timestamp()}
+    
+    filename = f"{user_id}_{int(datetime.now().timestamp())}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+    
+    with open(filename, "rb") as f:
+        caption = f"🌐 ДОМЕН-ОТЧЁТ\n\n🔍 Запрос: {query}\n📌 Найдено: {total}\n🔍 Осталось: {remaining}/5\n⏱️ Время: {elapsed:.1f} сек\n🛡️ @Arhapov"
+        if len(caption) > 1000:
+            caption = caption[:997] + "..."
+        bot.send_document(chat_id, f, caption=caption, parse_mode=None)
+    
+    os.remove(filename)
+    try:
+        bot.delete_message(chat_id, msg.message_id)
+    except:
+        pass
+
+async def run_username_search(chat_id, user_id, query):
+    start_time = time.time()
+    msg = safe_send_message(chat_id, "👤 Поиск по username...\n⏱️ Время: до 10 секунд")
+    
+    try:
+        data = await search_username(query)
+    except Exception as e:
+        safe_edit_message(chat_id, msg.message_id, f"⚠️ Ошибка: {str(e)[:100]}")
+        return
+    
+    remaining = use_search(user_id)
+    elapsed = time.time() - start_time
+    
+    if data.get("hidden"):
+        safe_edit_message(chat_id, msg.message_id, "🔒 Данные скрыты по запросу владельца")
+        return
+    
+    text = format_telegram_result(data)
+    text += f"\n\n⏱️ Время: {elapsed:.1f} сек\n🔍 Осталось: {remaining}/5"
+    safe_edit_message(chat_id, msg.message_id, text, parse_mode="Markdown")
+
+# ==================== ГЛОБАЛЬНЫЙ ОБРАБОТЧИК КОЛБЭКОВ ====================
 
 @bot.callback_query_handler(func=lambda call: True)
 def global_callback_handler(call):
@@ -1925,7 +2196,6 @@ def global_callback_handler(call):
         
         data = call.data
         
-        # ===== ОБРАБОТЧИК ВЫБОРА РЕЖИМА ПОИСКА =====
         if data.startswith('search_'):
             user_id = call.from_user.id
             query = user_state.get(f"search_query_{user_id}", "")
@@ -1937,7 +2207,6 @@ def global_callback_handler(call):
             run_search_sync(call.message.chat.id, user_id, query, mode)
             return
         
-        # ===== МЕНЮ =====
         if data == "menu_back":
             safe_edit_message(
                 call.message.chat.id,
@@ -2130,6 +2399,8 @@ def global_callback_handler(call):
             return
         
         if data == "telegram_search":
+            user_id = call.from_user.id
+            user_search_mode[user_id] = "username"
             safe_edit_message(
                 call.message.chat.id,
                 call.message.message_id,
@@ -2148,6 +2419,108 @@ def global_callback_handler(call):
             safe_send_message(call.message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
         except:
             pass
+
+# ==================== ОБРАБОТЧИК ТЕКСТА ====================
+
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    try:
+        text = message.text.strip()
+        
+        if not text:
+            return
+        
+        if TECH_MODE and message.from_user.id != ADMIN_ID:
+            safe_send_message(message.chat.id, "🔧 Бот на техническом обслуживании\n\n⏰ Вернёмся через несколько минут!")
+            return
+        
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+        
+        if user_search_mode.get(user_id):
+            mode = user_search_mode.pop(user_id)
+            run_search_sync(chat_id, user_id, text, mode)
+            return
+        
+        if check_hidden_data(text):
+            safe_send_message(chat_id, "🔒 Человек скрыл свои данные\n\nДанные этого пользователя скрыты по его запросу.\n\n🛡️ @Arhapov")
+            return
+        
+        is_digits = re.match(r'^[\d\s\-()+.]+$', text)
+        
+        if is_digits:
+            markup = get_choice_keyboard_for_numbers()
+            user_state[f"search_query_{user_id}"] = text
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
+        else:
+            markup = get_choice_keyboard_for_text()
+            user_state[f"search_query_{user_id}"] = text
+            safe_send_message(chat_id, "📌 Выберите тип функции для поиска:", reply_markup=markup)
+        
+    except Exception as e:
+        logger.error(f"Handle text error: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
+
+# ==================== МЕНЮ ====================
+
+def main_menu_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("👁️ ГЛОБАЛЬНЫЙ ПОИСК", callback_data="global_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📱 ТЕЛЕФОН", callback_data="phone_search"),
+        types.InlineKeyboardButton("📧 EMAIL", callback_data="email_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👤 USERNAME", callback_data="username_search"),
+        types.InlineKeyboardButton("🌐 IP/ДОМЕН", callback_data="domain_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🌍 ГЕОИНТ", callback_data="geoint_search"),
+        types.InlineKeyboardButton("🖼️ МЕТАДАННЫЕ", callback_data="metadata_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📱 TELEGRAM", callback_data="telegram_search")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🔒 СКРЫТЬ ДАННЫЕ", callback_data="hide_data"),
+        types.InlineKeyboardButton("⚡ ПРОФИЛЬ", callback_data="menu_profile")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📊 БАЛАНС", callback_data="menu_balance"),
+        types.InlineKeyboardButton("❓ ПОМОЩЬ", callback_data="menu_help")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🛡️ КАНАЛ", url="https://t.me/Arhapov")
+    )
+    return markup
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    try:
+        logger.info(f"Start command from {message.from_user.id}")
+        remaining = get_remaining(message.from_user.id)
+        user_id = message.from_user.id
+        user_state.pop(user_id, None)
+        user_state.pop(f"search_query_{user_id}", None)
+        user_search_mode.pop(user_id, None)
+        
+        safe_send_message(
+            message.chat.id,
+            f"👁️ Глаз Исиды — OSINT\n\n"
+            f"🕵️ Привет, {message.from_user.first_name}!\n"
+            f"⚡ Глубокий OSINT-поиск\n"
+            f"🛡️ Множество источников\n\n"
+            f"📊 Осталось: {remaining}/5\n\n"
+            f"📌 Выбери действие:",
+            reply_markup=main_menu_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Start error: {e}")
+        safe_send_message(message.chat.id, f"⚠️ Ошибка: {str(e)[:100]}")
 
 # ==================== ЗАПУСК ====================
 

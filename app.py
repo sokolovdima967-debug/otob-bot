@@ -2496,7 +2496,7 @@ def global_callback_handler(call):
     except Exception as e:
         logger.error(f"❌ Global callback error: {e}")
 
-# ==================== ОБРАБОТЧИК ТЕКСТА ====================
+# ==================== ОБРАБОТЧИК ТЕКСТА (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ) ====================
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):

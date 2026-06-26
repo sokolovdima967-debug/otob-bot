@@ -2299,20 +2299,13 @@ async def run_global_search(chat_id, user_id, query):
     
     # Проверка на скрытие
     if data.get("hidden") or data.get("sources", {}).get("hidden"):
+        # ===== НЕ УДАЛЯЕМ СООБЩЕНИЕ, А РЕДАКТИРУЕМ ЕГО =====
         safe_edit_message(chat_id, msg.message_id, "🔒 Данные скрыты по запросу владельца")
-        try:
-            bot.delete_message(chat_id, msg.message_id)
-        except:
-            pass
         return
     
     if data.get("type") in ["username", "telegram_id"]:
         text = format_telegram_result(data)
-        safe_send_message(chat_id, text, parse_mode="Markdown")
-        try:
-            bot.delete_message(chat_id, msg.message_id)
-        except:
-            pass
+        safe_edit_message(chat_id, msg.message_id, text, parse_mode="Markdown")
         return
     
     report_id = f"{user_id}_{int(datetime.now().timestamp())}"

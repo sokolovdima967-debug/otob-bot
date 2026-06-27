@@ -57,80 +57,10 @@ logger = logging.getLogger(__name__)
 bot = telebot.TeleBot(TOKEN, parse_mode=None)
 bot.remove_webhook()
 
-# ==================== ФУНКЦИЯ БАНВОРД ====================
-
-def leet(text: str) -> str:
-    """Преобразует текст в leet speak (банворд стиль)"""
-    leet_map = {
-        'а': '4', 'А': '4',
-        'б': '6', 'Б': '6',
-        'в': '8', 'В': '8',
-        'е': '3', 'Е': '3',
-        'ё': '3', 'Ё': '3',
-        'з': '3', 'З': '3',
-        'и': '1', 'И': '1',
-        'й': '1', 'Й': '1',
-        'к': 'K', 'К': 'K',
-        'м': 'M', 'М': 'M',
-        'о': '0', 'О': '0',
-        'р': 'P', 'Р': 'P',
-        'с': 'C', 'С': 'C',
-        'т': 'T', 'Т': 'T',
-        'ы': 'bI', 'Ы': 'bI',
-        'ь': 'b', 'Ь': 'b',
-        'э': '3', 'Э': '3',
-    }
-    
-    result = ''
-    for char in text:
-        if char in leet_map:
-            result += leet_map[char]
-        else:
-            result += char
-    
-    return result
-
-def leet_safe(text: str) -> str:
-    """Преобразует текст в банворд, но сохраняет ссылки, команды и сообщения о скрытии"""
-    if not text:
-        return text
-    
-    # Если это ссылка или команда — не трогаем
-    if text.startswith('http') or text.startswith('/') or text.startswith('@'):
-        return text
-    
-    # Если это Markdown-ссылка [текст](url) — сохраняем url
-    if re.search(r'\[.*?\]\(.*?\)', text):
-        parts = re.split(r'(\[.*?\]\(.*?\))', text)
-        result = []
-        for part in parts:
-            if part.startswith('[') and '](' in part:
-                result.append(part)
-            else:
-                result.append(leet(part))
-        return ''.join(result)
-    
-    # ===== ИСКЛЮЧЕНИЕ ДЛЯ СКРЫТИЯ ДАННЫХ =====
-    hide_keywords = ['скрытие данных', 'скрыть', 'контакт', 'отправить контакт', 
-                     'ФИО', 'телефон', 'номер', 'аккаунт', 'личность',
-                     'заявка', 'одобрена', 'отклонена', 'скрыты',
-                     'контактный телефон', 'личности', 'подтверждения']
-    
-    for keyword in hide_keywords:
-        if keyword.lower() in text.lower():
-            return text
-    
-    # Обычный текст — применяем банворд
-    return leet(text)
-
 # ==================== БЕЗОПАСНЫЕ ФУНКЦИИ ОТПРАВКИ ====================
 
 def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None, max_length=4000):
     try:
-        # Применяем банворд к тексту, но сохраняем ссылки и скрытие
-        if text:
-            text = leet_safe(text)
-        
         if len(text) > max_length:
             text = text[:max_length] + "...\n\n⚠️ Сообщение обрезано"
         return bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -145,10 +75,6 @@ def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None, max_len
 
 def safe_edit_message(chat_id, message_id, text, parse_mode=None, reply_markup=None, max_length=4000):
     try:
-        # Применяем банворд к тексту, но сохраняем ссылки и скрытие
-        if text:
-            text = leet_safe(text)
-        
         if len(text) > max_length:
             text = text[:max_length] + "...\n\n⚠️ Сообщение обрезано"
         return bot.edit_message_text(text, chat_id, message_id, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -620,7 +546,6 @@ def check_hidden_data(query: str) -> bool:
 
 def _notify_owner(owner_id: int, query: str):
     try:
-        # Это сообщение НЕ преобразуется в банворд (содержит ключевые слова)
         safe_send_message(
             owner_id,
             f"🛡️ Уведомление о попытке поиска\n\n"
@@ -1202,26 +1127,26 @@ def format_telegram_result(data: dict) -> str:
     telegram = sources.get("telegram", {})
     
     if sources.get("hidden"):
-        return "🔒 Данные скрыты по запросу владельца"
+        return "🔒 **Данные скрыты по запросу владельца**\n\nЭтот пользователь скрыл свои данные от поиска."
     
     if not telegram.get("found"):
         return "❌ Пользователь не найден"
     
-    text = "📱 TELEGRAM ПРОФИЛЬ\n\n"
-    text += f"🆔 ID: `{telegram.get('user_id', '—')}`\n"
-    text += f"👤 Username: @{telegram.get('username', '—')}\n"
-    text += f"📛 Имя: {telegram.get('first_name', '—')}\n"
-    text += f"📛 Фамилия: {telegram.get('last_name', '—')}\n"
-    text += f"🤖 Бот: {'Да' if telegram.get('is_bot') else 'Нет'}\n"
-    text += f"🔗 Ссылка: [t.me/{telegram.get('username', '—')}]({telegram.get('url', '#')})\n\n"
+    text = "📱 **TELEGRAM ПРОФИЛЬ**\n\n"
+    text += f"🆔 **ID:** `{telegram.get('user_id', '—')}`\n"
+    text += f"👤 **Username:** @{telegram.get('username', '—')}\n"
+    text += f"📛 **Имя:** {telegram.get('first_name', '—')}\n"
+    text += f"📛 **Фамилия:** {telegram.get('last_name', '—')}\n"
+    text += f"🤖 **Бот:** {'Да' if telegram.get('is_bot') else 'Нет'}\n"
+    text += f"🔗 **Ссылка:** [t.me/{telegram.get('username', '—')}]({telegram.get('url', '#')})\n\n"
     
-    text += "📋 ДЕТАЛИ:\n"
-    text += f"🗝️ Регистрация: {telegram.get('age', '≈ Неизвестно')}\n"
-    text += f"👮‍♂️ Интересовались: {telegram.get('interested', 0)} человек\n"
-    text += f"📝 Описание: {telegram.get('description', '—')}\n"
-    text += f"📝 Bio: {telegram.get('bio', '—')}\n\n"
+    text += "📋 **ДЕТАЛИ:**\n"
+    text += f"🗝️ **Регистрация:** {telegram.get('age', '≈ Неизвестно')}\n"
+    text += f"👮‍♂️ **Интересовались:** {telegram.get('interested', 0)} человек\n"
+    text += f"📝 **Описание:** {telegram.get('description', '—')}\n"
+    text += f"📝 **Bio:** {telegram.get('bio', '—')}\n\n"
     
-    text += "👁️ Глаз Исиды — OSINT\n"
+    text += "👁️ **Глаз Исиды — OSINT**\n"
     text += "🛡️ @Afipov"
     
     return text
@@ -1704,8 +1629,9 @@ def hide_data_callback(call):
         types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
     )
     
-    # Этот текст НЕ преобразуется в банворд
-    text = (
+    safe_edit_message(
+        call.message.chat.id,
+        call.message.message_id,
         f"🔒 **Скрытие данных**\n\n"
         f"👤 Твой аккаунт:\n"
         f"🆔 ID: {user_id}\n"
@@ -1713,12 +1639,7 @@ def hide_data_callback(call):
         f"📛 Имя: {user_data['first_name']}\n\n"
         f"📌 Нажми кнопку ниже и отправь свой контакт.\n"
         f"Это нужно для получения номера телефона.\n\n"
-        f"📝 После этого введи только ФИО для скрытия."
-    )
-    safe_edit_message(
-        call.message.chat.id,
-        call.message.message_id,
-        text,
+        f"📝 После этого введи только ФИО для скрытия.",
         reply_markup=markup,
         parse_mode="Markdown"
     )
@@ -1735,7 +1656,6 @@ def send_contact_hide(call):
     contact_button = types.KeyboardButton("📱 Отправить контакт", request_contact=True)
     markup.add(contact_button)
     
-    # Этот текст НЕ преобразуется в банворд
     safe_send_message(
         user_id,
         "📱 Нажми кнопку ниже, чтобы отправить свой контакт.\n\n"
@@ -1772,7 +1692,6 @@ def handle_contact(message):
         markup = types.ReplyKeyboardRemove()
         user_data = get_user_data(user_id)
         
-        # Этот текст НЕ преобразуется в банворд
         safe_send_message(
             user_id,
             f"✅ Контакт получен!\n\n"
@@ -2203,6 +2122,7 @@ def users_command(message):
 
 @bot.message_handler(commands=['start', 'menu'])
 def start_command(message):
+    """Команда /start и /menu - открывает главное меню"""
     try:
         logger.info(f"Menu command from {message.from_user.id}")
         remaining = get_remaining(message.from_user.id)
@@ -2229,6 +2149,7 @@ def start_command(message):
 
 @bot.message_handler(commands=['search'])
 def search_command(message):
+    """Команда /search - открывает глобальный поиск"""
     try:
         user_id = message.from_user.id
         user_search_mode[user_id] = "global"
@@ -2254,6 +2175,7 @@ def search_command(message):
 
 @bot.message_handler(commands=['account'])
 def account_command(message):
+    """Команда /account - открывает профиль пользователя"""
     try:
         user_id = message.from_user.id
         user_data = get_user(user_id, message.from_user.username or "Unknown")
@@ -2295,6 +2217,7 @@ def account_command(message):
 
 @bot.message_handler(commands=['hide'])
 def hide_command_short(message):
+    """Команда /hide - открывает скрытие данных"""
     try:
         user_id = message.from_user.id
         user_data = get_user_data(user_id)
@@ -2305,7 +2228,6 @@ def hide_command_short(message):
             types.InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu_back")
         )
         
-        # Этот текст НЕ преобразуется в банворд
         safe_send_message(
             message.chat.id,
             f"🔒 **Скрытие данных**\n\n"
@@ -2375,7 +2297,9 @@ async def run_global_search(chat_id, user_id, query):
     total = data.get("total_results", 0)
     remaining = use_search(user_id)
     
+    # Проверка на скрытие
     if data.get("hidden") or data.get("sources", {}).get("hidden"):
+        # ===== НЕ УДАЛЯЕМ СООБЩЕНИЕ, А РЕДАКТИРУЕМ ЕГО =====
         safe_edit_message(chat_id, msg.message_id, "🔒 Данные скрыты по запросу владельца")
         return
     
